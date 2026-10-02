@@ -97,8 +97,9 @@ custom message로 전달합니다. print 모드는 stderr에도 출력합니다.
    성공 OID, 실패 그룹, 남은 그룹을 보고합니다. history reset/checkout/fallback 없음.
 9. push는 `--push`가 있고 모든 계획 커밋이 성공했을 때만 수행합니다. 현재 브랜치를
    설정된 upstream remote/branch에 명시적인 non-force `HEAD:<upstream ref>`로 전송합니다.
-   태그 follow, matching/mirror/force refspec 등 주변 push 설정과 서브모듈 재귀 push는
-   비활성화합니다. detached HEAD, 누락/모호/안전하지 않은 upstream이면 거부하며,
+   태그 follow, matching/mirror/force refspec 등 주변 push 설정은 비활성화합니다.
+   서브모듈은 `--recurse-submodules=check`로 검사하여 참조한 커밋이 서브모듈 remote에 없으면
+   거부하며, 서브모듈을 자동으로 push하지 않습니다. detached HEAD, 누락/모호/안전하지 않은 upstream이면 거부하며,
    non-fast-forward도 거부합니다. push 거부/실패를 보고하고 성공한 로컬 커밋은 그대로
    남겨 둡니다. history reset이나 자동 재시도는 하지 않습니다.
 

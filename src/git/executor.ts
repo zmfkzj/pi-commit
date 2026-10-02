@@ -215,7 +215,8 @@ export async function executePlan(snapshot: RepoSnapshot, plan: CommitPlan, orde
 
 /**
  * Explicit --push only: one attached branch to its configured upstream branch, never tags,
- * matching branches, recursive submodules, mirrors or force refspecs. Failure retains local history.
+ * matching branches, recursive submodule pushes, mirrors or force refspecs. Submodule commits must
+ * be available on a remote (check mode). Failure retains local history.
  */
 export async function pushRepository(cwd: string): Promise<void> {
   const branchResult = await git(cwd, ["symbolic-ref", "--quiet", "HEAD"], { allowFailure: true });
@@ -248,7 +249,7 @@ export async function pushRepository(cwd: string): Promise<void> {
   }
   await git(cwd, [
     "-c", "push.default=nothing", "-c", "push.followTags=false", "-c", `remote.${remote}.mirror=false`,
-    "-c", "push.recurseSubmodules=no", "push", "--no-force", "--no-follow-tags", "--recurse-submodules=no",
+    "-c", "push.recurseSubmodules=check", "push", "--no-force", "--no-follow-tags", "--recurse-submodules=check",
     "--", remote, `HEAD:${merge}`,
   ]);
 }

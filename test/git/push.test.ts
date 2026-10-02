@@ -59,6 +59,34 @@ describe("explicit upstream-only non-force push", () => {
     expect(await readFile(join(root, ".git", "index"))).toEqual(beforeIndex);
     expect(await readFile(join(root, "file"), "utf8")).toBe("new local commit\n");
   });
+  test("submodule check refuses unpublished commits without pushing them; published commits succeed", async () => {
+    const { root, remote } = await fixture(), source = await fixture();
+    await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", source.remote, "sub"]);
+    await git(root, ["commit", "-qm", "Add published submodule"]);
+    const published = await ref(root, "HEAD");
+    await git(root, ["config", "push.recurseSubmodules", "no"]);
+    await pushRepository(root);
+    expect(await ref(remote, "refs/heads/upstream-main")).toBe(published);
+
+    const sub = join(root, "sub"); await configureAuthor(sub);
+    const unpublished = await commit(sub, "file", "unpublished submodule commit\n");
+    await git(root, ["add", "--", "sub"]);
+    await git(root, ["commit", "-qm", "Update submodule pointer"]);
+    const next = await ref(root, "HEAD"), subRemoteBefore = await refs(source.remote);
+    expect(lineOutput((await git(root, ["rev-parse", "HEAD:sub"])).stdout)).toBe(unpublished);
+    expect(await ref(source.remote, `${unpublished}^{commit}`)).toBeNull();
+
+    await expect(pushRepository(root)).rejects.toThrow("not be found on any remote");
+    expect(await ref(remote, "refs/heads/upstream-main")).toBe(published);
+    expect(await ref(root, "HEAD")).toBe(next);
+    expect(await refs(source.remote)).toBe(subRemoteBefore);
+    expect(await ref(source.remote, `${unpublished}^{commit}`)).toBeNull();
+
+    await git(sub, ["push", "origin", "HEAD:refs/heads/upstream-main"]);
+    await pushRepository(root);
+    expect(await ref(remote, "refs/heads/upstream-main")).toBe(next);
+    expect(await ref(source.remote, "refs/heads/upstream-main")).toBe(unpublished);
+  });
   test("push.default=matching cannot push another branch's new commits", async () => {
     const { root, remote } = await fixture(); const sideBefore = await otherBranch(root);
     const mainNext = await commit(root, "file", "main update\n");
