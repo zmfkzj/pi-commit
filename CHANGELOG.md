@@ -12,6 +12,8 @@
 
 ### Changed
 
+- Raised the default commit planning timeout from 120 to 300 seconds.
+
 - The plan shown by `--dry-run`, the confirmation dialog and `--yes` no longer includes any diffs (hunk lines, whole-file diffs or the changelog diff); it is now a compact commit plan summary with groups, messages, dependencies, files, selected hunks and the changelog target.
 - `--yes` now skips the confirmation dialog in every mode after showing the plan summary; `--dry-run` still never writes.
 - Large change sets use less model context, and the evidence-limit error now lists the largest files and how to stage a subset.

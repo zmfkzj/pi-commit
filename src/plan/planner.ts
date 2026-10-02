@@ -32,7 +32,7 @@ export interface PlannerOptions {
   context?: string;
   recentCommits?: string[];
   signal?: AbortSignal;
-  /** Whole operation deadline, including retries (default 120 seconds). */
+  /** Whole operation deadline, including retries (default 300 seconds). */
   timeoutMs?: number;
   /** Total model calls, including the initial attempt (default 3, maximum 8). */
   maxAttempts?: number;
@@ -173,7 +173,7 @@ async function abortableComplete(adapter: ModelAdapter, messages: ModelMessage[]
 export async function planCommits(snapshot: RepoSnapshot, adapter: ModelAdapter, options: PlannerOptions = {}): Promise<CommitPlan> {
   if (!snapshot.files.length) throw new Error("No changes to plan.");
   const maxAttempts = options.maxAttempts ?? 3;
-  const timeoutMs = options.timeoutMs ?? 120_000;
+  const timeoutMs = options.timeoutMs ?? 300_000;
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 8) throw new Error("maxAttempts must be an integer from 1 to 8.");
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) throw new Error("timeoutMs must be a positive supported timeout.");
   const overview = snapshot.files.map(file => ({ path: file.path, oldPath: file.oldPath, status: file.status, binary: file.binary, isLockfile: file.isLockfile, hunkSplittable: file.hunkSplittable, hunks: file.hunks.map(hunk => ({ id: hunk.id, header: hunk.header })) }));
