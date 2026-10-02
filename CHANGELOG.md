@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/commit` previews of large diffs no longer crash the TUI (`Maximum call stack size exceeded` in Markdown rendering); `/commit` output is now rendered as plain text instead of Markdown.
+
 ### Changed
 
 - `--yes` now skips the confirmation dialog in every mode after showing the full preview; `--dry-run` still never writes.
