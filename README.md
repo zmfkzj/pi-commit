@@ -1,6 +1,7 @@
 # pi-commit
 
-pi coding-agent의 `/commit` 확장입니다. **변경 분석 → 단일/분할 커밋 계획 → 전체 미리보기 → 명시적 승인 → Git 커밋**을 제공합니다.
+pi coding-agent의 `/commit` 확장입니다. **변경 분석 → 단일/분할 커밋 계획 → 계획 요약 → 명시적 승인 → Git 커밋**을 제공합니다.
+실행하면 먼저 `pi-commit: analyzing changes and planning commits…` 시작 메시지를 표시하고, 계획 요약에는 diff를 포함하지 않습니다.
 
 - 하나의 파일도 서로 다른 diff hunk를 여러 커밋으로 나눌 수 있습니다.
 - 의존성 순서, 전체 변경의 정확히 한 번 선택, manifest/lockfile 묶음을 검증합니다.
@@ -46,12 +47,12 @@ pi install --local /home/arthur/Code/pi-commit
 
 | 인자 | 의미 |
 |---|---|
-| `--dry-run` | 계획과 changelog diff만 표시. index/worktree/HEAD/remote를 변경하지 않음 |
+| `--dry-run` | 계획 요약(diff 제외)만 표시. index/worktree/HEAD/remote를 변경하지 않음 |
 | `--model provider/id` | 등록된 정확한 모델 선택. 생략하면 현재 `ctx.model` 사용 |
 | `--context "내용"` | 분석·분할·메시지 작성에 추가 지시. 여러 단어는 따옴표 사용 |
 | `--no-changelog` | 생성 changelog 비활성화. 기존 사용자 changelog 변경은 일반 변경으로 취급 |
 | `--push` | 모든 계획 커밋 성공 후 현재 브랜치만 설정된 upstream으로 non-force push. 태그 포함 안 함 |
-| `--yes` | 승인 대화상자를 건너뜀 (TUI/RPC/print 모두). 전체 미리보기는 먼저 출력하며, `--dry-run`과 함께 써도 쓰기는 없음 |
+| `--yes` | 승인 대화상자를 건너뜀 (TUI/RPC/print 모두). 계획 요약은 먼저 출력하며, `--dry-run`과 함께 써도 쓰기는 없음 |
 | `--help` | 도움말 |
 
 `--model`은 pi 세션의 모델을 변경하지 않습니다. 인증/OAuth/header 처리는
@@ -60,8 +61,8 @@ pi install --local /home/arthur/Code/pi-commit
 
 `--yes`가 없으면 TUI 및 RPC에서는 승인 대화상자가 필요하며, 취소/Escape/거절하면
 저장소를 변경하지 않습니다. UI가 없는 print/JSON 모드에서는 `--yes` 없이 쓰기를 거부합니다.
-`--yes`는 모든 모드에서 승인 대화상자를 건너뛰고 전체 미리보기 출력 직후 바로 실행합니다
-(미리보기는 항상 먼저 표시되며, `--dry-run`은 `--yes`가 있어도 절대 쓰지 않음):
+`--yes`는 모든 모드에서 승인 대화상자를 건너뛰고 계획 요약 출력 직후 바로 실행합니다
+(계획 요약은 항상 먼저 표시되며, `--dry-run`은 `--yes`가 있어도 절대 쓰지 않음):
 
 ```sh
 # 계획만 확인 (print의 확장 출력은 stderr)
@@ -71,8 +72,8 @@ pi -e /home/arthur/Code/pi-commit/src/index.ts -p '/commit --dry-run'
 pi -e /home/arthur/Code/pi-commit/src/index.ts -p '/commit --yes --no-changelog'
 ```
 
-JSON/RPC stdout에는 임의 텍스트를 쓰지 않으며, 미리보기·결과는 `pi-commit`
-custom message로 전달합니다. print 모드는 stderr에도 출력합니다.
+JSON/RPC stdout에는 임의 텍스트를 쓰지 않으며, 시작 메시지·계획 요약·결과는 `pi-commit`
+custom message(일반 텍스트로 렌더링)로 전달합니다. print 모드는 stderr에도 출력합니다.
 네이티브 `pi commit` 하위 명령은 제공하지 않습니다.
 
 ## 선택 및 안전 모델
@@ -87,8 +88,9 @@ custom message로 전달합니다. print 모드는 stderr에도 출력합니다.
    manifest를 매핑 순서로, 없으면 매핑 이름·경로 정렬로 찾습니다. 대응 manifest가
    없으면 lockfile만 있는 별도 deps 그룹이 필요합니다. 대응 manifest 자체를 여러
    그룹으로 나누면 거부합니다. 자동으로 선택을 몰래 재배치하지 않습니다.
-5. 전체 메시지/본문, 의존성 순서, 경로, 선택 hunk와 diff, 생성 changelog diff를
-   표시한 뒤 승인받습니다. 모델이 커밋을 임의 실행할 수 없습니다.
+5. 전체 메시지/본문, 의존성 순서, 경로, 선택한 hunk ID/개수, 생성 changelog 대상과 항목을
+   요약해 표시한 뒤 승인받습니다. diff 내용(hunk 줄, 파일 전체 diff, changelog diff)은
+   표시하지 않으므로 변경 내용은 `git diff`로 직접 확인하세요. 모델이 커밋을 임의 실행할 수 없습니다.
 6. HEAD, 실제 index bytes, 변경 diff와 tracked/nonignored worktree 내용의 fingerprint를
    실행 직전에 비교합니다. 생성 changelog 내용도 따로 재검사합니다.
 7. 커밋별 임시 `GIT_INDEX_FILE`에 선택 내용만 구성하여 일반 `git commit`을 실행합니다.
@@ -114,7 +116,7 @@ custom message로 전달합니다. print 모드는 stderr에도 출력합니다.
 
 모델이 사용자 영향이 있는 그룹에 `changelogEntry`를 제안한 경우에만 생성합니다.
 root의 `CHANGELOG.md`/대소문자·하이픈 변형을 감지하며, 없으면 `CHANGELOG.md`를
-미리보기로 제안합니다. `Added:`, `Fixed:` 등의 접두사를 지원하며 기본 카테고리는
+새로 생성할 대상으로 제안합니다(계획 요약에는 대상 파일명과 그룹별 항목만 표시). `Added:`, `Fixed:` 등의 접두사를 지원하며 기본 카테고리는
 `Changed`입니다. `Unreleased` 내 중복을 제거하고 기존 본문/버전 기록/개행 방식을
 삽입 영역 밖에서 그대로 보존합니다. **최종 의존성 순서 그룹**에 전체 생성 항목을 포함합니다.
 
@@ -134,8 +136,8 @@ symlink/non-UTF8 changelog는 자동 병합을 거부합니다. `--no-changelog`
 - read-only 스냅샷에는 전체 tracked/nonignored 내용 hash 비용이 있습니다. 계획 증거는
   최대 1 MB, 모델 응답 검증은 최대 3회, 전체 모델 작업 제한은 기본 120초입니다.
   hunk로 분할 가능한 diff 내용은 모델에 `git_hunk`로 한 번만 전달하고(`git_file_diff`에는
-  중복하지 않음), 큰 whole-file-only 파일은 모델용으로 요약/잘라서 전달합니다(미리보기와
-  실행은 전체 diff 사용). 그래도 1 MB를 넘으면 모델 호출 전에 거부하며, 오류에 가장 큰
+  중복하지 않음), 큰 whole-file-only 파일은 모델용으로 요약/잘라서 전달합니다(실행은
+  전체 diff 사용). 그래도 1 MB를 넘으면 모델 호출 전에 거부하며, 오류에 가장 큰
   파일 목록과 일부만 stage(`git add <경로>` 후 `/commit`)하라는 안내를 표시합니다.
 - 단일 root changelog만 처리하며 monorepo 여러 changelog/release 배포는 지원하지 않습니다.
 - legacy llm-git/backend/cache 및 upstream 전체 8400 LOC vendoring은 포함하지 않습니다.

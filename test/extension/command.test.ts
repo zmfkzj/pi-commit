@@ -8,7 +8,7 @@ import type { ModelAdapter, ModelMessage } from "../../src/types.js";
 import commitExtension from "../../src/index.js";
 import { runCommitCommand, resolveModel, type CommitContext } from "../../src/command/run.js";
 import { parseCommitArgs, tokenizeArgs } from "../../src/command/args.js";
-import { changelogDiff, safeDisplay } from "../../src/ui/format.js";
+import { safeDisplay } from "../../src/ui/format.js";
 import { git } from "../../src/git/process.js";
 import { planCommits } from "../../src/plan/planner.js";
 
@@ -17,6 +17,9 @@ afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { rec
 const base = Array.from({ length: 80 }, (_, i) => `line ${i + 1}\n`).join("");
 const changed = base.replace("line 5\n", "fixed five\nextra line\n").replace("line 55\n", "fixed fifty-five\n");
 const originalChangelog = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Existing behavior.\n\n## [1.0.0]\n\n- Released history.\n";
+const START_MESSAGE = "pi-commit: analyzing changes and planning commits…";
+/** Any unified-diff style line (+/- content, hunk headers, diff/index headers) at the start of a line. */
+const DIFF_LINE = /^(\+|-|@@|diff --git|index [0-9a-f]+\.\.)/m;
 async function repo(changelog = true): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "pi-commit-extension-test-")); roots.push(root);
   await git(root, ["init", "-q"]);
@@ -49,9 +52,9 @@ async function state(root: string) {
     status: (await git(root, ["status", "--porcelain=v2", "-z", "--untracked-files=all"])).stdout };
 }
 async function run(root: string, args = "", adapter = mockModel(), ctx = context(root)) {
-  const output: string[] = [];
-  const result = await runCommitCommand(args, ctx, { adapter, output: text => output.push(text) });
-  return { result, output: output.join("\n") };
+  const outputs: string[] = [];
+  const result = await runCommitCommand(args, ctx, { adapter, output: text => outputs.push(text) });
+  return { result, output: outputs.join("\n"), outputs };
 }
 async function runWithStaleChangelog(root: string, args: string, adapter: ModelAdapter) {
   const output: string[] = [];
@@ -87,11 +90,13 @@ describe("argument parser", () => {
 });
 
 describe("pipeline safety with real temporary Git repositories", () => {
-  test("worktree split dry-run previews all hunks and changelog; byte immutable even with --yes --push", async () => {
+  test("worktree split dry-run shows the whole plan summary and changelog target; byte immutable even with --yes --push", async () => {
     const root = await repo(), before = await state(root);
     const { result, output } = await run(root, "--dry-run --yes --push", mockModel(true, true), context(root, true, async () => { throw new Error("Must not confirm dry-run"); }));
     expect(result.status).toBe("dry-run"); expect(await state(root)).toEqual(before);
-    for (const text of ["Mode: worktree", "g1 -> g2", "file.txt#1", "file.txt#2", "fixed five", "fixed fifty-five", "Detailed rationale", "Dependencies: g1", "+- Improve part 1.", "EXPLICIT PUSH REQUEST"]) expect(output).toContain(text);
+    for (const text of ["pi-commit plan", "Mode: worktree", "g1 -> g2", "file.txt#1", "file.txt#2", "1 of 2 hunk(s)", "Detailed rationale", "Dependencies: g1", "Changelog entry: Fixed: Improve part 1.", "Generated changelog: \"CHANGELOG.md\" (included in g2)", "EXPLICIT PUSH REQUEST"]) expect(output).toContain(text);
+    for (const text of ["fixed five", "fixed fifty-five", "@@ "]) expect(output).not.toContain(text);
+    expect(output).not.toMatch(DIFF_LINE);
   });
   test("staged dry-run preserves unstaged edits and index bytes", async () => {
     const root = await repo(); await git(root, ["add", "--", "file.txt"]);
@@ -105,11 +110,11 @@ describe("pipeline safety with real temporary Git repositories", () => {
     const { result } = await run(root, "", mockModel(false, true), ctx);
     expect(result.status).toBe("cancelled"); expect(confirmations).toBe(1); expect(await state(root)).toEqual(before);
   });
-  test("--yes skips the confirmation dialog with UI, still shows the preview, and executes", async () => {
+  test("--yes skips the confirmation dialog with UI, still shows the plan summary, and executes", async () => {
     const root = await repo(); let confirmations = 0;
     const ctx = context(root, true, async () => { confirmations++; throw new Error("must not confirm"); });
     const { result, output } = await run(root, "--yes", mockModel(true, true), ctx);
-    expect(confirmations).toBe(0); expect(output).toContain("pi-commit preview"); expect(output).toContain("Detailed rationale");
+    expect(confirmations).toBe(0); expect(output).toContain("pi-commit plan"); expect(output).toContain("Detailed rationale");
     expect(result.status).toBe("executed"); expect(result.execution?.error).toBeUndefined(); expect(result.execution?.succeeded).toHaveLength(2);
     expect((await git(root, ["rev-list", "--count", "HEAD"])).stdout.toString().trim()).toBe("3");
     expect((await git(root, ["diff", "--cached"])).stdout.length).toBe(0); expect(await readFile(join(root, "file.txt"), "utf8")).toBe(changed);
@@ -120,10 +125,10 @@ describe("pipeline safety with real temporary Git repositories", () => {
     const { result } = await run(root, "--dry-run --yes", mockModel(false, true), ctx);
     expect(result.status).toBe("dry-run"); expect(confirmations).toBe(0); expect(await state(root)).toEqual(before);
   });
-  test("noninteractive without --yes refuses after full preview", async () => {
+  test("noninteractive without --yes refuses after the full plan summary", async () => {
     const root = await repo(), before = await state(root);
     const { result, output } = await run(root, "", mockModel(false, true), context(root, false));
-    expect(result.status).toBe("refused"); expect(output).toContain("pi-commit preview"); expect(output).toContain("--yes"); expect(await state(root)).toEqual(before);
+    expect(result.status).toBe("refused"); expect(output).toContain("pi-commit plan"); expect(output).toContain("--yes"); expect(await state(root)).toEqual(before);
   });
   test("noninteractive --yes commits split SAME FILE and final changelog", async () => {
     const root = await repo(), { result, output } = await run(root, "--yes", mockModel(true, true), context(root, false));
@@ -137,11 +142,40 @@ describe("pipeline safety with real temporary Git repositories", () => {
     expect(await readFile(join(root, "file.txt"), "utf8")).toBe(changed);
     expect((await git(root, ["diff", "--cached"])).stdout.length).toBe(0); expect(result.pushed).toBeUndefined(); expect(output).toContain("Commit plan completed");
   });
-  test("interactive single commit authorization contains complete preview", async () => {
+  test("interactive single commit authorization contains the complete plan summary", async () => {
     const root = await repo(); let message = "";
     const ctx = context(root); ctx.ui.confirm = async (_title, text) => { message = text; return true; };
     const { result } = await run(root, "--no-changelog", mockModel(), ctx);
-    expect(result.execution?.succeeded).toHaveLength(1); expect(message).toContain("Fix behavior"); expect(message).toContain("fixed five"); expect(message).toContain("ALL");
+    expect(result.execution?.succeeded).toHaveLength(1); expect(message).toContain("Fix behavior"); expect(message).toContain("\"file.txt\""); expect(message).toContain("ALL");
+    expect(message).not.toContain("fixed five"); expect(message).not.toMatch(DIFF_LINE);
+  });
+  test("plan summary and confirmation dialog never include diff content", async () => {
+    const root = await repo(); await writeFile(join(root, "file.txt"), `${changed}added-line-unique\n`);
+    let message = "";
+    const ctx = context(root); ctx.ui.confirm = async (_title, text) => { message = text; return false; };
+    const { result, output } = await run(root, "", mockModel(true, true), ctx);
+    expect(result.status).toBe("cancelled"); expect(result.plan?.groups).toHaveLength(3);
+    for (const text of [output, message]) {
+      for (const wanted of ["Fix part 1", "Fix part 3", "\"file.txt\"", "\"file.txt#3\"", "1 of 3 hunk(s)", "Detailed rationale 2", "Changelog entry: Fixed: Improve part 3.", "Generated changelog: \"CHANGELOG.md\" (included in g3)"]) expect(text).toContain(wanted);
+      for (const unwanted of ["added-line-unique", "+added-line", "fixed five", "fixed fifty-five", "extra line", "@@ ", "--- ", "+++ "]) expect(text).not.toContain(unwanted);
+      expect(text).not.toMatch(DIFF_LINE);
+    }
+    expect(message).toContain("Create 3 commit(s)");
+  });
+  test("start message is the first output of a normal run, precedes snapshot and model planning, and is absent for --help", async () => {
+    const root = await repo(), outputs: string[] = [], underlying = mockModel(), seenByModel: string[][] = [];
+    const adapter: ModelAdapter = { complete: async (...parameters) => { seenByModel.push([...outputs]); return underlying.complete(...parameters); } };
+    const result = await runCommitCommand("--dry-run", context(root), { adapter, output: text => outputs.push(text) });
+    expect(result.status).toBe("dry-run");
+    expect(outputs[0]).toBe(START_MESSAGE); expect(outputs[1]).toStartWith("pi-commit plan"); expect(outputs.filter(text => text === START_MESSAGE)).toHaveLength(1);
+    expect(seenByModel).toEqual([[START_MESSAGE]]);
+    const help = await run(root, "--help");
+    expect(help.result.status).toBe("help"); expect(help.outputs).toHaveLength(1); expect(help.output).not.toContain(START_MESSAGE); expect(help.output).toContain("/commit [--dry-run]");
+    const invalid = await run(root, "--wat");
+    expect(invalid.result.status).toBe("error"); expect(invalid.output).not.toContain(START_MESSAGE);
+    await writeFile(join(root, "file.txt"), base);
+    const empty = await run(root, "", { complete: async () => { throw new Error("should not call"); } });
+    expect(empty.outputs).toEqual([START_MESSAGE, "No changes to commit."]);
   });
   test("model exception and malformed retry exhaustion produce no writes or fallback", async () => {
     const root = await repo(), before = await state(root);
@@ -270,9 +304,7 @@ describe("load and display", () => {
     });
     expect(result.text).toContain("public pi loader: commit registered"); expect(result.code).toBe(0);
   }, 30_000);
-  test("terminal controls escaped and changelog diff exact additions", () => {
+  test("terminal controls escaped", () => {
     expect(safeDisplay("hello\x1b[31m\u202eevil")).toBe("hello\\u001b[31m\\u202eevil");
-    expect(changelogDiff({ file: "CHANGELOG.md", originalContent: "a\nb\n", newContent: "a\nnew\nb\n" })).toContain("+new");
-    expect(changelogDiff({ file: "CHANGELOG.md", originalContent: null, newContent: "new" })).toContain("No newline at end of file");
   });
 });

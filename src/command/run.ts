@@ -59,12 +59,14 @@ async function prepareChangelog(snapshot: RepoSnapshot, plan: CommitPlan): Promi
   plan.changelog = change.newContent !== (change.originalContent ?? "") ? change : undefined;
 }
 
-/** Plan -> complete preview -> affirmative authorization -> drift-guarded executor. */
+/** Plan -> plan summary -> affirmative authorization -> drift-guarded executor. */
 export async function runCommitCommand(args: string, ctx: CommitContext, services: CommandServices): Promise<CommandResult> {
   let result: CommandResult = { status: "error" };
   try {
     const options = parseCommitArgs(args);
     if (options.help) { services.output(HELP); return { status: "help" }; }
+    // Snapshot + model planning can take a while; show immediately that /commit started.
+    services.output("pi-commit: analyzing changes and planning commits…");
     ctx.signal?.throwIfAborted();
     const model = services.adapter ? undefined : resolveModel(ctx, options.model);
     const snapshot = await snapshotRepository(ctx.cwd);
@@ -82,7 +84,7 @@ export async function runCommitCommand(args: string, ctx: CommitContext, service
     services.output(preview);
     ctx.signal?.throwIfAborted();
     if (options.dryRun) { services.output("Dry-run: no repository or remote writes."); return { ...result, status: "dry-run" }; }
-    // --yes explicitly authorizes the already-displayed preview, so it skips the dialog in every mode.
+    // --yes explicitly authorizes the already-displayed plan summary, so it skips the dialog in every mode.
     if (!options.yes) {
       if (ctx.hasUI) {
         const confirmed = await ctx.ui.confirm("Execute this exact commit plan?", `${preview}\n\nCreate ${plan.groups.length} commit(s)${options.push ? " AND push" : ""}?`, { signal: ctx.signal });

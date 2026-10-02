@@ -9,7 +9,7 @@ export default function commitExtension(pi: ExtensionAPI): void {
   // Guarded so hosts without message renderers still load the command.
   if (typeof pi.registerMessageRenderer === "function") pi.registerMessageRenderer(COMMIT_MESSAGE_TYPE, renderCommitMessage);
   pi.registerCommand("commit", {
-    description: "Preview and confirm single or hunk-split Git commits (/commit --help)",
+    description: "Plan and confirm single or hunk-split Git commits (/commit --help)",
     handler: async (args, ctx) => {
       if (running) { ctx.ui.notify("A /commit operation is already running.", "warning"); return; }
       running = true;
