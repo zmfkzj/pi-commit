@@ -51,21 +51,23 @@ pi install --local /home/arthur/Code/pi-commit
 | `--context "내용"` | 분석·분할·메시지 작성에 추가 지시. 여러 단어는 따옴표 사용 |
 | `--no-changelog` | 생성 changelog 비활성화. 기존 사용자 changelog 변경은 일반 변경으로 취급 |
 | `--push` | 모든 계획 커밋 성공 후 현재 브랜치만 설정된 upstream으로 non-force push. 태그 포함 안 함 |
-| `--yes` | **대화 UI가 없을 때만** 명시적으로 쓰기를 승인 |
+| `--yes` | 승인 대화상자를 건너뜀 (TUI/RPC/print 모두). 전체 미리보기는 먼저 출력하며, `--dry-run`과 함께 써도 쓰기는 없음 |
 | `--help` | 도움말 |
 
 `--model`은 pi 세션의 모델을 변경하지 않습니다. 인증/OAuth/header 처리는
 `ctx.modelRegistry.streamSimple()`에 위임하며 키를 보관·출력하지 않습니다.
 `/login`, `/model`, `models.json` 등 기존 pi 모델 설정을 사용하세요.
 
-TUI 및 RPC에서는 `--yes`를 넣어도 승인 대화상자가 필요합니다. 취소/Escape/거절하면
-저장소를 변경하지 않습니다. UI가 없는 print/JSON 모드에서는 `--yes` 없이 쓰기를 거부합니다:
+`--yes`가 없으면 TUI 및 RPC에서는 승인 대화상자가 필요하며, 취소/Escape/거절하면
+저장소를 변경하지 않습니다. UI가 없는 print/JSON 모드에서는 `--yes` 없이 쓰기를 거부합니다.
+`--yes`는 모든 모드에서 승인 대화상자를 건너뛰고 전체 미리보기 출력 직후 바로 실행합니다
+(미리보기는 항상 먼저 표시되며, `--dry-run`은 `--yes`가 있어도 절대 쓰지 않음):
 
 ```sh
 # 계획만 확인 (print의 확장 출력은 stderr)
 pi -e /home/arthur/Code/pi-commit/src/index.ts -p '/commit --dry-run'
 
-# 비대화식 쓰기를 의도적으로 승인한 경우만 사용
+# 승인 대화상자 없이 쓰기를 의도적으로 승인한 경우만 사용 (비대화식 포함)
 pi -e /home/arthur/Code/pi-commit/src/index.ts -p '/commit --yes --no-changelog'
 ```
 

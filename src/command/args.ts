@@ -9,14 +9,14 @@ export interface CommitOptions {
 }
 
 export const HELP = `/commit [--dry-run] [--model provider/id] [--context "instructions"] [--no-changelog] [--push] [--yes]
-Preview a single or hunk-split commit plan, then explicitly confirm.
+Preview a single or hunk-split commit plan, then confirm (or skip the dialog with --yes).
 --dry-run       Preview only; never change index, files, history or remote.
 --model         Exact registered provider/id; otherwise use the current pi model.
 --context       Additional planning instructions (quote multi-word values).
 --no-changelog  Do not generate a changelog (existing edits remain in the plan).
 --push          Push only after every planned commit succeeds; never force push.
---yes           Explicit write authorization ONLY when no dialog UI is available.
---help          Show this help. Interactive and RPC modes always require confirmation.`;
+--yes           Skip the confirmation dialog and execute right after the full preview (all modes); --dry-run still never writes.
+--help          Show this help. Without --yes, interactive/RPC modes ask for confirmation and print/JSON modes refuse to write.`;
 
 /** Shell-like quoting for slash-command arguments; no shell is ever evaluated. */
 export function tokenizeArgs(input: string): string[] {

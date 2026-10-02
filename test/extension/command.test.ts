@@ -99,11 +99,26 @@ describe("pipeline safety with real temporary Git repositories", () => {
     const before = await state(root), { result, output } = await run(root, "--dry-run");
     expect(result.status).toBe("dry-run"); expect(output).toContain("Mode: staged"); expect(output).not.toContain("+unstaged text"); expect(await state(root)).toEqual(before);
   });
-  test("decline/escape zero writes and --yes does not bypass interactive confirmation", async () => {
+  test("decline/escape zero writes without --yes (confirmation is required)", async () => {
     const root = await repo(), before = await state(root); let confirmations = 0;
     const ctx = context(root, true, async () => { confirmations++; return false; });
-    const { result } = await run(root, "--yes", mockModel(false, true), ctx);
+    const { result } = await run(root, "", mockModel(false, true), ctx);
     expect(result.status).toBe("cancelled"); expect(confirmations).toBe(1); expect(await state(root)).toEqual(before);
+  });
+  test("--yes skips the confirmation dialog with UI, still shows the preview, and executes", async () => {
+    const root = await repo(); let confirmations = 0;
+    const ctx = context(root, true, async () => { confirmations++; throw new Error("must not confirm"); });
+    const { result, output } = await run(root, "--yes", mockModel(true, true), ctx);
+    expect(confirmations).toBe(0); expect(output).toContain("pi-commit preview"); expect(output).toContain("Detailed rationale");
+    expect(result.status).toBe("executed"); expect(result.execution?.error).toBeUndefined(); expect(result.execution?.succeeded).toHaveLength(2);
+    expect((await git(root, ["rev-list", "--count", "HEAD"])).stdout.toString().trim()).toBe("3");
+    expect((await git(root, ["diff", "--cached"])).stdout.length).toBe(0); expect(await readFile(join(root, "file.txt"), "utf8")).toBe(changed);
+  });
+  test("--dry-run --yes with UI never confirms and never writes", async () => {
+    const root = await repo(), before = await state(root); let confirmations = 0;
+    const ctx = context(root, true, async () => { confirmations++; return true; });
+    const { result } = await run(root, "--dry-run --yes", mockModel(false, true), ctx);
+    expect(result.status).toBe("dry-run"); expect(confirmations).toBe(0); expect(await state(root)).toEqual(before);
   });
   test("noninteractive without --yes refuses after full preview", async () => {
     const root = await repo(), before = await state(root);

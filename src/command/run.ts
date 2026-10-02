@@ -82,12 +82,15 @@ export async function runCommitCommand(args: string, ctx: CommitContext, service
     services.output(preview);
     ctx.signal?.throwIfAborted();
     if (options.dryRun) { services.output("Dry-run: no repository or remote writes."); return { ...result, status: "dry-run" }; }
-    if (ctx.hasUI) {
-      const confirmed = await ctx.ui.confirm("Execute this exact commit plan?", `${preview}\n\nCreate ${plan.groups.length} commit(s)${options.push ? " AND push" : ""}?`, { signal: ctx.signal });
-      if (confirmed !== true) { services.output("Cancelled: no repository writes."); return { ...result, status: "cancelled" }; }
-    } else if (!options.yes) {
-      services.output("Refused: no confirmation UI. Use --dry-run, or explicitly authorize writes with --yes.", "warning");
-      return { ...result, status: "refused" };
+    // --yes explicitly authorizes the already-displayed preview, so it skips the dialog in every mode.
+    if (!options.yes) {
+      if (ctx.hasUI) {
+        const confirmed = await ctx.ui.confirm("Execute this exact commit plan?", `${preview}\n\nCreate ${plan.groups.length} commit(s)${options.push ? " AND push" : ""}?`, { signal: ctx.signal });
+        if (confirmed !== true) { services.output("Cancelled: no repository writes."); return { ...result, status: "cancelled" }; }
+      } else {
+        services.output("Refused: no confirmation UI. Use --dry-run, or explicitly authorize writes with --yes.", "warning");
+        return { ...result, status: "refused" };
+      }
     }
     ctx.signal?.throwIfAborted();
     const execution = await executePlan(snapshot, plan, validation.orderedGroups);
