@@ -133,6 +133,10 @@ symlink/non-UTF8 changelog는 자동 병합을 거부합니다. `--no-changelog`
   index conflict는 먼저 해결해야 합니다.
 - read-only 스냅샷에는 전체 tracked/nonignored 내용 hash 비용이 있습니다. 계획 증거는
   최대 1 MB, 모델 응답 검증은 최대 3회, 전체 모델 작업 제한은 기본 120초입니다.
+  hunk로 분할 가능한 diff 내용은 모델에 `git_hunk`로 한 번만 전달하고(`git_file_diff`에는
+  중복하지 않음), 큰 whole-file-only 파일은 모델용으로 요약/잘라서 전달합니다(미리보기와
+  실행은 전체 diff 사용). 그래도 1 MB를 넘으면 모델 호출 전에 거부하며, 오류에 가장 큰
+  파일 목록과 일부만 stage(`git add <경로>` 후 `/commit`)하라는 안내를 표시합니다.
 - 단일 root changelog만 처리하며 monorepo 여러 changelog/release 배포는 지원하지 않습니다.
 - legacy llm-git/backend/cache 및 upstream 전체 8400 LOC vendoring은 포함하지 않습니다.
 - **실제 터미널 UI 조작, live LLM provider/OAuth 호출은 검증하지 않았습니다.**
