@@ -37,6 +37,8 @@ export const LOCK_FILE_MANIFESTS: Readonly<Record<string, readonly string[]>> = 
   "uv.lock": ["pyproject.toml"], "composer.lock": ["composer.json"], "Gemfile.lock": ["Gemfile"],
   "flake.lock": ["flake.nix"], "pubspec.lock": ["pubspec.yaml"], "Podfile.lock": ["Podfile"],
   "mix.lock": ["mix.exs"], "gradle.lockfile": ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"],
+  "npm-shrinkwrap.json": ["package.json"], "deno.lock": ["deno.json", "deno.jsonc"],
+  "packages.lock.json": [], // MSBuild manifest filenames are project-specific.
 };
 
 /** Conservative on both POSIX and Windows; exact snapshot membership is checked separately. */

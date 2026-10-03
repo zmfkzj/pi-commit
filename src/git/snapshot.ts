@@ -1,9 +1,10 @@
 import { lstat, readFile, readlink } from "node:fs/promises";
 import { basename, join, posix } from "node:path";
 import type { ChangeStatus, FileChange, Hunk, RepoSnapshot } from "../types.js";
+import { LOCK_FILE_MANIFESTS } from "../plan/validate.js";
 import { digest, git, lineOutput, nulPaths } from "./process.js";
 
-const LOCKFILES = new Set(["package-lock.json", "npm-shrinkwrap.json", "bun.lock", "bun.lockb", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock", "poetry.lock", "uv.lock", "Pipfile.lock", "go.sum", "Gemfile.lock", "composer.lock", "mix.lock", "pubspec.lock", "packages.lock.json", "flake.lock", "deno.lock"]);
+const LOCKFILES = new Set(Object.keys(LOCK_FILE_MANIFESTS));
 export function isLockfile(path: string): boolean { return LOCKFILES.has(basename(path)); }
 export function safePath(path: string): boolean {
   return !!path && !path.includes("\0") && !path.startsWith("/") && !path.includes("\\") &&

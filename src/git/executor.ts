@@ -56,13 +56,13 @@ async function checkChangelog(root: string, plan: CommitPlan): Promise<void> {
 }
 
 /** Replace only selected entries, retaining flags and unrelated staged entries from the real index. */
-async function reconcileIndex(root: string, realIndex: string, temporary: string, paths: string[]): Promise<void> {
+async function reconcileIndex(root: string, realIndex: string, temporary: string, paths: string[], oid: string): Promise<void> {
   const existing = await optionalRead(realIndex);
   const env = { GIT_INDEX_FILE: temporary };
   await rm(temporary, { force: true });
   if (existing) await writeFile(temporary, existing);
   else await git(root, ["read-tree", "--empty"], { env });
-  const tree = nulPaths((await git(root, ["ls-tree", "-z", "--full-tree", "HEAD", "--", ...paths])).stdout);
+  const tree = nulPaths((await git(root, ["ls-tree", "-z", "--full-tree", oid, "--", ...paths])).stdout);
   const entries = new Map(tree.map(entry => {
     const tab = entry.indexOf("\t"), meta = entry.slice(0, tab).split(" ");
     return [entry.slice(tab + 1), `${meta[0]} ${meta[2]}`];
@@ -164,7 +164,11 @@ export async function executePlan(snapshot: RepoSnapshot, plan: CommitPlan, orde
       const commit = await git(root, ["commit", "--cleanup=verbatim", "-m", message], { env: commitEnv, allowFailure: true });
       const nextHead = await headOid(root);
       if (nextHead === expectedHead || !nextHead) throw new Error(`Commit ${group.id} failed: ${commit.stderr.toString("utf8").trim() || commit.stdout.toString("utf8").trim()}`);
-      // History has advanced: record it before any fallible reconciliation; never reset it.
+      const actualTree = lineOutput((await git(root, ["rev-parse", `${nextHead}^{tree}`])).stdout);
+      const parents = lineOutput((await git(root, ["rev-list", "--parents", "-n", "1", nextHead])).stdout).split(" ").slice(1);
+      if (JSON.stringify(parents) !== JSON.stringify(parentBeforeCommit ? [parentBeforeCommit] : [])) throw new Error("HEAD changed concurrently; history retained, group stopped");
+      if (actualTree !== intendedTree) throw new Error("A commit hook or external process changed the previewed tree; history retained, group stopped");
+      // The expected commit exists: record it before any fallible reconciliation; never reset it.
       result.succeeded.push({ oid: nextHead, groupId: group.id });
       if (generated) changelogCommitted = true;
       result.remainingGroups = groups.slice(i + 1).map(g => g.id);
@@ -172,12 +176,8 @@ export async function executePlan(snapshot: RepoSnapshot, plan: CommitPlan, orde
       for (const selector of group.selectors) if (selector.hunks !== "all") committedHunks.set(selector.path, [...(committedHunks.get(selector.path) ?? []), ...selector.hunks]);
       if (!sameBytes(await optionalRead(realIndex), expectedIndex)) throw new Error("Real index changed despite lock; committed history retained, index not overwritten");
       const reconcilePaths = snapshot.mode === "worktree" ? changedPaths : generated ? [generated.file] : [];
-      if (reconcilePaths.length) await reconcileIndex(root, realIndex, reconcile, reconcilePaths);
+      if (reconcilePaths.length) await reconcileIndex(root, realIndex, reconcile, reconcilePaths, nextHead);
       expectedIndex = await optionalRead(realIndex);
-      const actualTree = lineOutput((await git(root, ["rev-parse", "HEAD^{tree}"])).stdout);
-      const parents = lineOutput((await git(root, ["rev-list", "--parents", "-n", "1", nextHead])).stdout).split(" ").slice(1);
-      if (JSON.stringify(parents) !== JSON.stringify(parentBeforeCommit ? [parentBeforeCommit] : [])) throw new Error("HEAD changed concurrently; created commit retained, remaining groups stopped");
-      if (actualTree !== intendedTree) throw new Error("A commit hook changed the previewed tree; commit retained, remaining groups stopped");
       if (await worktreeDigest(root, fixedPaths) !== expectedWorktree) throw new Error("A commit hook or external process changed the worktree; changes preserved, remaining groups stopped");
       if (commit.code !== 0) throw new Error(`Git reported failure after creating commit ${nextHead}: ${commit.stderr.toString("utf8").trim()}`);
       active = undefined;
@@ -250,6 +250,6 @@ export async function pushRepository(cwd: string): Promise<void> {
   await git(cwd, [
     "-c", "push.default=nothing", "-c", "push.followTags=false", "-c", `remote.${remote}.mirror=false`,
     "-c", "push.recurseSubmodules=check", "push", "--no-force", "--no-follow-tags", "--recurse-submodules=check",
-    "--", remote, `HEAD:${merge}`,
+    "--", remote, `${branchRef}:${merge}`,
   ]);
 }

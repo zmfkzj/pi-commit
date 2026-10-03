@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pushRepository } from "../../src/git/index.js";
@@ -58,6 +58,22 @@ describe("explicit upstream-only non-force push", () => {
     expect(await ref(remote, "refs/heads/main")).toBeNull();
     expect(await readFile(join(root, ".git", "index"))).toEqual(beforeIndex);
     expect(await readFile(join(root, "file"), "utf8")).toBe("new local commit\n");
+  });
+  test("HEAD switching after branch resolution still pushes the resolved branch ref", async () => {
+    const { root, remote, initial } = await fixture(), next = await commit(root, "file", "main update\n");
+    await git(root, ["branch", "side", initial]);
+    const bin = await temporary("pi-commit-push-git-"), realGit = Bun.which("git")!;
+    const wrapper = join(bin, "git"), argv = join(bin, "push-argv");
+    await writeFile(wrapper, `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = push ]; then\n    "${realGit}" symbolic-ref HEAD refs/heads/side || exit 1\n    printf '%s\\n' "$@" > "${argv}"\n    break\n  fi\ndone\nexec "${realGit}" "$@"\n`);
+    await chmod(wrapper, 0o755);
+    const originalPath = process.env.PATH;
+    try { process.env.PATH = `${bin}:${originalPath}`; await pushRepository(root); }
+    finally { process.env.PATH = originalPath; }
+    expect(await ref(root, "HEAD")).toBe(initial);
+    expect(await ref(remote, "refs/heads/upstream-main")).toBe(next);
+    const args = (await readFile(argv, "utf8")).trim().split("\n");
+    expect(args.slice(-3)).toEqual(["--", "origin", "refs/heads/main:refs/heads/upstream-main"]);
+    expect(args).not.toContain("HEAD:refs/heads/upstream-main");
   });
   test("submodule check refuses unpublished commits without pushing them; published commits succeed", async () => {
     const { root, remote } = await fixture(), source = await fixture();

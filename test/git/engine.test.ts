@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { CommitGroup, CommitPlan, RepoSnapshot, Selector } from "../../src/types.js";
 import { executePlan, isLockfile, pushRepository, snapshotRepository } from "../../src/git/index.js";
 import { git, lineOutput } from "../../src/git/process.js";
+import { LOCK_FILE_MANIFESTS, validatePlan } from "../../src/plan/validate.js";
 
 const repos: string[] = [];
 afterEach(async () => { for (const path of repos.splice(0)) await rm(path, { recursive: true, force: true }); });
@@ -55,8 +56,20 @@ describe("read-only snapshot", () => {
     expect(await show(root, "new.txt")).toBe("new\n");
   });
   test("lockfile catalog", () => {
-    for (const name of ["package-lock.json", "bun.lock", "bun.lockb", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock"]) expect(isLockfile(`nested/${name}`)).toBe(true);
+    for (const name of Object.keys(LOCK_FILE_MANIFESTS)) expect(isLockfile(`nested/${name}`)).toBe(true);
+    for (const name of ["npm-shrinkwrap.json", "packages.lock.json", "deno.lock", "Podfile.lock", "gradle.lockfile"]) expect(isLockfile(name)).toBe(true);
     expect(isLockfile("lock-not-real.txt")).toBe(false);
+  });
+  for (const [lock, manifest] of [["Podfile.lock", "Podfile"], ["gradle.lockfile", "build.gradle"]]) test(`${lock} snapshots enforce whole-file and manifest pairing rules`, async () => {
+    const root = await repo({ [lock]: "old lock\n", [manifest]: "old manifest\n" });
+    await writeFile(join(root, lock), "new lock\n"); await writeFile(join(root, manifest), "new manifest\n");
+    const snapshot = await snapshotRepository(root), file = snapshot.files.find(f => f.path === lock)!;
+    expect(file.isLockfile).toBe(true); expect(file.hunks.length).toBeGreaterThan(0);
+    const split = { groups: [group("lock", [{ path: lock, hunks: file.hunks.map(h => h.id) }]), group("manifest", [{ path: manifest, hunks: "all" }])] };
+    expect(validatePlan(split, snapshot).errors.map(e => e.code)).toContain("whole_file_required");
+    const unpaired = { groups: [group("lock", [{ path: lock, hunks: "all" }]), group("manifest", [{ path: manifest, hunks: "all" }])] };
+    expect(validatePlan(unpaired, snapshot).errors.map(e => e.code)).toContain("lockfile_group");
+    expect(validatePlan(all(snapshot), snapshot).valid).toBe(true);
   });
 });
 
@@ -165,6 +178,24 @@ describe("failure safety", () => {
     expect(await index(root)).toEqual(before); expect((await git(root, ["rev-parse", "HEAD"])).stdout).toEqual(head);
     expect(await readFile(join(root, "CHANGELOG.md"), "utf8")).toBe("original\n");
     expect(await readFile(join(root, "file.txt"), "utf8")).toBe("changed\n");
+  });
+  for (const mismatch of ["parent", "tree"] as const) test(`foreign HEAD with unexpected ${mismatch} is not accepted or reconciled`, async () => {
+    const root = await repo({ "file.txt": "base\n", "CHANGELOG.md": "original\n" });
+    await writeFile(join(root, "file.txt"), "planned\n");
+    const snapshot = await snapshotRepository(root), before = await index(root), plan = all(snapshot);
+    plan.changelog = { file: "CHANGELOG.md", originalContent: "original\n", newContent: "generated\n" };
+    const tree = mismatch === "parent" ? "$(git write-tree)" : "$(git rev-parse HEAD^{tree})";
+    const parent = mismatch === "parent" ? "" : ` -p ${snapshot.headOid}`;
+    await hook(root, `foreign=$(git commit-tree "${tree}"${parent} -m Foreign)\ngit update-ref HEAD "$foreign"\nexit 1`);
+    const result = await executePlan(snapshot, plan);
+    expect(result.error).toContain(mismatch === "parent" ? "HEAD changed concurrently" : "changed the previewed tree");
+    expect(result.succeeded).toHaveLength(0); expect(result.failedGroup).toBe("all"); expect(result.remainingGroups).toEqual(["all"]);
+    expect(result.restoredIndex).toBe(true); expect(result.changelogRestored).toBe(true);
+    expect(await index(root)).toEqual(before);
+    expect(await readFile(join(root, "CHANGELOG.md"), "utf8")).toBe("original\n");
+    expect(await readFile(join(root, "file.txt"), "utf8")).toBe("planned\n");
+    expect(lineOutput((await git(root, ["log", "-1", "--format=%s"])).stdout)).toBe("Foreign");
+    expect(lineOutput((await git(root, ["rev-parse", "HEAD"])).stdout)).not.toBe(snapshot.headOid);
   });
   test("failure restores newly generated changelog by removing only our file", async () => {
     const root = await repo(); await writeFile(join(root, "file.txt"), "changed\n"); await hook(root, "exit 1");
