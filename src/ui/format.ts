@@ -33,11 +33,25 @@ export function formatPreview(snapshot: RepoSnapshot, plan: CommitPlan, ordered:
   return output.join("\n");
 }
 
-export function formatExecution(result: ExecutionResult): string {
-  const output = [result.error ? (result.succeeded.length ? "Partial success; stopped." : "Commit failed; stopped.") : "Commit plan completed."];
-  for (const item of result.succeeded) output.push(`${item.groupId}: ${item.oid}`);
-  if (result.failedGroup) output.push(`Failed group: ${result.failedGroup}`);
-  if (result.error) output.push(`Error: ${safeDisplay(result.error)}`);
+/**
+ * Result of executing a plan. Success is message-centric (short OID + commit subject per commit) and never lists
+ * committed files; failures keep full OIDs, the failed/remaining groups and restore status for recovery.
+ */
+export function formatExecution(result: ExecutionResult, groups: CommitGroup[] = []): string {
+  const subject = (id: string) => {
+    const group = groups.find(item => item.id === id);
+    return group ? safeDisplay(group.message.subject) : undefined;
+  };
+  if (!result.error) {
+    const count = result.succeeded.length;
+    const output = [`Committed ${count} commit${count === 1 ? "" : "s"}:`];
+    for (const item of result.succeeded) output.push(`${item.oid.slice(0, 7)} ${subject(item.groupId) ?? item.groupId}`);
+    return output.join("\n");
+  }
+  const output = [result.succeeded.length ? "Partial success; stopped." : "Commit failed; stopped."];
+  for (const item of result.succeeded) output.push(`${item.groupId}: ${item.oid}${subject(item.groupId) ? ` ${subject(item.groupId)}` : ""}`);
+  if (result.failedGroup) output.push(`Failed group: ${result.failedGroup}${subject(result.failedGroup) ? ` (${subject(result.failedGroup)})` : ""}`);
+  output.push(`Error: ${safeDisplay(result.error)}`);
   if (result.remainingGroups.length) output.push(`Remaining: ${result.remainingGroups.join(", ")}`);
   if (result.restoredIndex) output.push("Original index restored.");
   if (result.changelogRestored) output.push("Generated changelog restored.");

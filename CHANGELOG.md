@@ -13,6 +13,7 @@
 ### Changed
 
 - Raised the default commit planning timeout from 120 to 300 seconds.
+- A committing `/commit` run no longer prints the file-level plan summary to the transcript; the result lists each new commit as its short hash and message (`Committed N commits:`) instead of group IDs and full hashes. The plan summary is still shown by `--dry-run`, in the confirmation dialog and when writes are refused, and failure output keeps full hashes, the failed/remaining groups and the error.
 
 - The plan shown by `--dry-run`, the confirmation dialog and `--yes` no longer includes any diffs (hunk lines, whole-file diffs or the changelog diff); it is now a compact commit plan summary with groups, messages, dependencies, files, selected hunks and the changelog target.
 - `--yes` now skips the confirmation dialog in every mode after showing the plan summary; `--dry-run` still never writes.

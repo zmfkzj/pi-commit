@@ -81,15 +81,17 @@ export async function runCommitCommand(args: string, ctx: CommitContext, service
     const validation = validatePlan(plan, snapshot);
     if (!validation.valid) throw new Error(`Invalid plan: ${validation.errors.map(error => error.message).join("; ")}`);
     const preview = formatPreview(snapshot, plan, validation.orderedGroups, options.push);
-    services.output(preview);
     ctx.signal?.throwIfAborted();
-    if (options.dryRun) { services.output("Dry-run: no repository or remote writes."); return { ...result, status: "dry-run" }; }
-    // --yes explicitly authorizes the already-displayed plan summary, so it skips the dialog in every mode.
+    // The file-level plan summary is shown where it is reviewed (dry-run output, the confirmation dialog, the
+    // refusal notice), but not posted to the transcript of a run that commits: its result stays message-centric.
+    if (options.dryRun) { services.output(preview); services.output("Dry-run: no repository or remote writes."); return { ...result, status: "dry-run" }; }
+    // --yes explicitly authorizes the validated plan, so it skips the dialog in every mode.
     if (!options.yes) {
       if (ctx.hasUI) {
         const confirmed = await ctx.ui.confirm("Execute this exact commit plan?", `${preview}\n\nCreate ${plan.groups.length} commit(s)${options.push ? " AND push" : ""}?`, { signal: ctx.signal });
         if (confirmed !== true) { services.output("Cancelled: no repository writes."); return { ...result, status: "cancelled" }; }
       } else {
+        services.output(preview);
         services.output("Refused: no confirmation UI. Use --dry-run, or explicitly authorize writes with --yes.", "warning");
         return { ...result, status: "refused" };
       }
@@ -97,7 +99,7 @@ export async function runCommitCommand(args: string, ctx: CommitContext, service
     ctx.signal?.throwIfAborted();
     const execution = await executePlan(snapshot, plan, validation.orderedGroups);
     result = { ...result, status: "executed", execution };
-    services.output(formatExecution(execution), execution.error ? "error" : "info");
+    services.output(formatExecution(execution, validation.orderedGroups), execution.error ? "error" : "info");
     if (options.push && !execution.error && !execution.remainingGroups.length && execution.succeeded.length === plan.groups.length) {
       try { await pushRepository(snapshot.root!); result.pushed = true; services.output("Push completed."); }
       catch { result.error = "Push failed or refused; local commits remain. No retry, force push or history rollback performed."; services.output(result.error, "error"); }

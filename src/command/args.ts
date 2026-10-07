@@ -9,13 +9,13 @@ export interface CommitOptions {
 }
 
 export const HELP = `/commit [--dry-run] [--model provider/id] [--context "instructions"] [--no-changelog] [--push] [--yes]
-Plan a single or hunk-split commit, show the plan summary (no diffs), then confirm (or skip the dialog with --yes).
+Plan a single or hunk-split commit, confirm the plan summary (no diffs) in a dialog (or skip it with --yes), then report each commit's message.
 --dry-run       Show the plan summary only; never change index, files, history or remote.
 --model         Exact registered provider/id; otherwise use the current pi model.
 --context       Additional planning instructions (quote multi-word values).
 --no-changelog  Do not generate a changelog (existing edits remain in the plan).
 --push          Push only after every planned commit succeeds; never force push.
---yes           Skip the confirmation dialog and execute right after the plan summary (all modes); --dry-run still never writes.
+--yes           Skip the confirmation dialog and execute the validated plan directly (all modes); --dry-run still never writes.
 --help          Show this help. Without --yes, interactive/RPC modes ask for confirmation and print/JSON modes refuse to write.`;
 
 /** Shell-like quoting for slash-command arguments; no shell is ever evaluated. */

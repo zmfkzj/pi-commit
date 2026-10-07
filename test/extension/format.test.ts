@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatPreview } from "../../src/ui/format.js";
+import { formatExecution, formatPreview } from "../../src/ui/format.js";
 import type { CommitGroup, CommitPlan } from "../../src/types.js";
 import { file, group, snapshot } from "../plan/fixtures.js";
 
@@ -43,5 +43,27 @@ describe("formatPreview plan summary", () => {
     expect(text).not.toContain("\u202e");
     expect(formatPreview(snap, { groups }, groups, true)).toContain("EXPLICIT PUSH REQUEST");
     expect(formatPreview(snap, { groups }, groups)).toContain("Generated changelog: none");
+  });
+});
+
+describe("formatExecution result", () => {
+  const groups: CommitGroup[] = [
+    { ...group("g1", "src/a.ts", ["src/a.ts#1"]), message: { subject: "Fix parser", body: "Long body text." } },
+    { ...group("g2", "src/b.ts", "all", ["g1"]), message: { subject: "Evil\x1b[31m subject" } },
+  ];
+  const oid1 = "1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", oid2 = "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+  test("success lists only short OID and commit subject, never committed files", () => {
+    const text = formatExecution({ succeeded: [{ groupId: "g1", oid: oid1 }, { groupId: "g2", oid: oid2 }], remainingGroups: [], restoredIndex: false, changelogRestored: false }, groups);
+    expect(text).toBe("Committed 2 commits:\n1111111 Fix parser\n2222222 Evil\\u001b[31m subject");
+    for (const unwanted of ["src/a.ts", "src/b.ts", "Long body text.", oid1, "g1", "g2"]) expect(text).not.toContain(unwanted);
+    expect(formatExecution({ succeeded: [{ groupId: "g1", oid: oid1 }], remainingGroups: [], restoredIndex: false, changelogRestored: false }, groups)).toBe("Committed 1 commit:\n1111111 Fix parser");
+  });
+
+  test("failure keeps full OIDs, failed/remaining groups, error and restore status", () => {
+    const partial = formatExecution({ succeeded: [{ groupId: "g1", oid: oid1 }], failedGroup: "g2", error: "hook failed", remainingGroups: ["g2"], restoredIndex: false, changelogRestored: false }, groups);
+    expect(partial).toBe(`Partial success; stopped.\ng1: ${oid1} Fix parser\nFailed group: g2 (Evil\\u001b[31m subject)\nError: hook failed\nRemaining: g2`);
+    const failed = formatExecution({ succeeded: [], failedGroup: "g1", error: "boom", remainingGroups: ["g1", "g2"], restoredIndex: true, changelogRestored: true }, groups);
+    expect(failed).toBe("Commit failed; stopped.\nFailed group: g1 (Fix parser)\nError: boom\nRemaining: g1, g2\nOriginal index restored.\nGenerated changelog restored.");
   });
 });

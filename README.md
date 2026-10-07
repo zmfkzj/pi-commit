@@ -2,6 +2,7 @@
 
 pi coding-agent의 `/commit` 확장입니다. **변경 분석 → 단일/분할 커밋 계획 → 계획 요약 → 명시적 승인 → Git 커밋**을 제공합니다.
 실행하면 먼저 `pi-commit: analyzing changes and planning commits…` 시작 메시지를 표시하고, 계획 요약에는 diff를 포함하지 않습니다.
+커밋 완료 결과에는 커밋한 파일 목록 없이 커밋별 짧은 해시와 메시지(subject)만 표시합니다(`Committed N commits:`).
 
 - 하나의 파일도 서로 다른 diff hunk를 여러 커밋으로 나눌 수 있습니다.
 - 의존성 순서, 전체 변경의 정확히 한 번 선택, manifest/lockfile 묶음을 검증합니다.
@@ -52,7 +53,7 @@ pi install --local /home/arthur/Code/pi-commit
 | `--context "내용"` | 분석·분할·메시지 작성에 추가 지시. 여러 단어는 따옴표 사용 |
 | `--no-changelog` | 생성 changelog 비활성화. 기존 사용자 changelog 변경은 일반 변경으로 취급 |
 | `--push` | 모든 계획 커밋 성공 후 현재 브랜치만 설정된 upstream으로 non-force push. 태그 포함 안 함 |
-| `--yes` | 승인 대화상자를 건너뜀 (TUI/RPC/print 모두). 계획 요약은 먼저 출력하며, `--dry-run`과 함께 써도 쓰기는 없음 |
+| `--yes` | 승인 대화상자를 건너뜀 (TUI/RPC/print 모두). 파일별 계획 요약 없이 바로 실행하고 결과(커밋 메시지)만 출력하며, `--dry-run`과 함께 써도 쓰기는 없음 |
 | `--help` | 도움말 |
 
 `--model`은 pi 세션의 모델을 변경하지 않습니다. 인증/OAuth/header 처리는
@@ -61,8 +62,8 @@ pi install --local /home/arthur/Code/pi-commit
 
 `--yes`가 없으면 TUI 및 RPC에서는 승인 대화상자가 필요하며, 취소/Escape/거절하면
 저장소를 변경하지 않습니다. UI가 없는 print/JSON 모드에서는 `--yes` 없이 쓰기를 거부합니다.
-`--yes`는 모든 모드에서 승인 대화상자를 건너뛰고 계획 요약 출력 직후 바로 실행합니다
-(계획 요약은 항상 먼저 표시되며, `--dry-run`은 `--yes`가 있어도 절대 쓰지 않음):
+`--yes`는 모든 모드에서 승인 대화상자를 건너뛰고 검증된 계획을 바로 실행합니다
+(파일별 계획 요약은 `--dry-run`, 승인 대화상자, 쓰기 거부 시에만 표시되며, `--dry-run`은 `--yes`가 있어도 절대 쓰지 않음):
 
 ```sh
 # 계획만 확인 (print의 확장 출력은 stderr)
@@ -75,6 +76,8 @@ pi -e /home/arthur/Code/pi-commit/src/index.ts -p '/commit --yes --no-changelog'
 JSON/RPC stdout에는 임의 텍스트를 쓰지 않으며, 시작 메시지·계획 요약·결과는 `pi-commit`
 custom message(일반 텍스트로 렌더링)로 전달합니다. print 모드는 stderr에도 출력합니다.
 네이티브 `pi commit` 하위 명령은 제공하지 않습니다.
+커밋을 실행하는 경우 transcript에는 파일별 계획 요약을 남기지 않고 커밋 메시지 중심의 결과만 표시합니다.
+실패/부분 성공 시에는 성공한 전체 OID, 실패 그룹, 오류, 남은 그룹, 복원 여부를 그대로 보고합니다.
 
 ## 선택 및 안전 모델
 

@@ -110,11 +110,14 @@ describe("pipeline safety with real temporary Git repositories", () => {
     const { result } = await run(root, "", mockModel(false, true), ctx);
     expect(result.status).toBe("cancelled"); expect(confirmations).toBe(1); expect(await state(root)).toEqual(before);
   });
-  test("--yes skips the confirmation dialog with UI, still shows the plan summary, and executes", async () => {
+  test("--yes skips the confirmation dialog with UI, executes, and reports commit messages without committed files", async () => {
     const root = await repo(); let confirmations = 0;
     const ctx = context(root, true, async () => { confirmations++; throw new Error("must not confirm"); });
-    const { result, output } = await run(root, "--yes", mockModel(true, true), ctx);
-    expect(confirmations).toBe(0); expect(output).toContain("pi-commit plan"); expect(output).toContain("Detailed rationale");
+    const { result, output, outputs } = await run(root, "--yes", mockModel(true, true), ctx);
+    expect(confirmations).toBe(0); expect(outputs).toHaveLength(2); expect(outputs[0]).toBe(START_MESSAGE);
+    const [first, second] = result.execution!.succeeded;
+    expect(outputs[1]).toBe(`Committed 2 commits:\n${first!.oid.slice(0, 7)} Fix part 1\n${second!.oid.slice(0, 7)} Fix part 2`);
+    for (const unwanted of ["file.txt", "CHANGELOG.md", "pi-commit plan", "Selection:", "Coverage:", "Detailed rationale"]) expect(output).not.toContain(unwanted);
     expect(result.status).toBe("executed"); expect(result.execution?.error).toBeUndefined(); expect(result.execution?.succeeded).toHaveLength(2);
     expect((await git(root, ["rev-list", "--count", "HEAD"])).stdout.toString().trim()).toBe("3");
     expect((await git(root, ["diff", "--cached"])).stdout.length).toBe(0); expect(await readFile(join(root, "file.txt"), "utf8")).toBe(changed);
@@ -140,26 +143,28 @@ describe("pipeline safety with real temporary Git repositories", () => {
     const final = (await git(root, ["show", "HEAD:CHANGELOG.md"])).stdout.toString();
     expect(final).toContain("Improve part 1."); expect(final).toContain("Improve part 2."); expect(final).toContain("Released history.");
     expect(await readFile(join(root, "file.txt"), "utf8")).toBe(changed);
-    expect((await git(root, ["diff", "--cached"])).stdout.length).toBe(0); expect(result.pushed).toBeUndefined(); expect(output).toContain("Commit plan completed");
+    expect((await git(root, ["diff", "--cached"])).stdout.length).toBe(0); expect(result.pushed).toBeUndefined(); expect(output).toContain("Committed 2 commits:");
+    expect(output).toContain("Fix part 1"); expect(output).toContain("Fix part 2"); expect(output).not.toContain("file.txt"); expect(output).not.toContain("CHANGELOG.md");
   });
-  test("interactive single commit authorization contains the complete plan summary", async () => {
+  test("interactive single commit authorization contains the complete plan summary; the result shows only the message", async () => {
     const root = await repo(); let message = "";
     const ctx = context(root); ctx.ui.confirm = async (_title, text) => { message = text; return true; };
-    const { result } = await run(root, "--no-changelog", mockModel(), ctx);
+    const { result, outputs } = await run(root, "--no-changelog", mockModel(), ctx);
     expect(result.execution?.succeeded).toHaveLength(1); expect(message).toContain("Fix behavior"); expect(message).toContain("\"file.txt\""); expect(message).toContain("ALL");
+    expect(outputs).toEqual([START_MESSAGE, `Committed 1 commit:\n${result.execution!.succeeded[0]!.oid.slice(0, 7)} Fix behavior`]);
     expect(message).not.toContain("fixed five"); expect(message).not.toMatch(DIFF_LINE);
   });
   test("plan summary and confirmation dialog never include diff content", async () => {
     const root = await repo(); await writeFile(join(root, "file.txt"), `${changed}added-line-unique\n`);
     let message = "";
     const ctx = context(root); ctx.ui.confirm = async (_title, text) => { message = text; return false; };
-    const { result, output } = await run(root, "", mockModel(true, true), ctx);
+    const { result, outputs } = await run(root, "", mockModel(true, true), ctx);
     expect(result.status).toBe("cancelled"); expect(result.plan?.groups).toHaveLength(3);
-    for (const text of [output, message]) {
-      for (const wanted of ["Fix part 1", "Fix part 3", "\"file.txt\"", "\"file.txt#3\"", "1 of 3 hunk(s)", "Detailed rationale 2", "Changelog entry: Fixed: Improve part 3.", "Generated changelog: \"CHANGELOG.md\" (included in g3)"]) expect(text).toContain(wanted);
-      for (const unwanted of ["added-line-unique", "+added-line", "fixed five", "fixed fifty-five", "extra line", "@@ ", "--- ", "+++ "]) expect(text).not.toContain(unwanted);
-      expect(text).not.toMatch(DIFF_LINE);
-    }
+    for (const wanted of ["Fix part 1", "Fix part 3", "\"file.txt\"", "\"file.txt#3\"", "1 of 3 hunk(s)", "Detailed rationale 2", "Changelog entry: Fixed: Improve part 3.", "Generated changelog: \"CHANGELOG.md\" (included in g3)"]) expect(message).toContain(wanted);
+    for (const unwanted of ["added-line-unique", "+added-line", "fixed five", "fixed fifty-five", "extra line", "@@ ", "--- ", "+++ "]) expect(message).not.toContain(unwanted);
+    expect(message).not.toMatch(DIFF_LINE);
+    // The dialog is the review surface; the transcript of a commit run does not repeat the file-level summary.
+    expect(outputs).toEqual([START_MESSAGE, "Cancelled: no repository writes."]);
     expect(message).toContain("Create 3 commit(s)");
   });
   test("start message is the first output of a normal run, precedes snapshot and model planning, and is absent for --help", async () => {
@@ -211,6 +216,7 @@ describe("pipeline safety with real temporary Git repositories", () => {
     const root = await repo(); await hook(root, 'case "$(git log -1 --format=%s)" in "Fix part 1") exit 1;; esac');
     const { result, output } = await run(root, "--yes", mockModel(true, true), context(root, false));
     expect(result.execution?.succeeded).toHaveLength(1); expect(result.execution?.failedGroup).toBe("g2"); expect(result.execution?.remainingGroups).toEqual(["g2"]); expect(output).toContain("Partial success");
+    expect(output).toContain(`g1: ${result.execution!.succeeded[0]!.oid} Fix part 1`); expect(output).toContain("Failed group: g2 (Fix part 2)"); expect(output).toContain("Error: "); expect(output).toContain("Remaining: g2");
     expect((await git(root, ["rev-list", "--count", "HEAD"])).stdout.toString().trim()).toBe("2");
     expect(await readFile(join(root, "CHANGELOG.md"), "utf8")).toBe(originalChangelog); expect(await readFile(join(root, "file.txt"), "utf8")).toBe(changed);
   });
@@ -237,7 +243,7 @@ describe("pipeline safety with real temporary Git repositories", () => {
     const root = await repo(false);
     const { result, output } = await runWithStaleChangelog(root, "--yes", mockModel());
     expect(result.execution?.succeeded).toHaveLength(1); expect(result.execution?.error).toBeUndefined(); expect(result.plan?.changelog).toBeUndefined();
-    expect(output).toContain("Generated changelog: none"); expect(output).not.toContain("STALE-PLANNER-CONTENT");
+    expect(output).not.toContain("STALE-PLANNER-CONTENT"); expect(output).toContain("Fix behavior");
     expect((await state(root)).changelog).toBeNull(); expect((await git(root, ["ls-tree", "HEAD", "--", "CHANGELOG.md"])).stdout.length).toBe(0);
   });
   test("deduped no-content-change merge clears stale planner changelog", async () => {
@@ -248,7 +254,7 @@ describe("pipeline safety with real temporary Git repositories", () => {
     } };
     const { result, output } = await runWithStaleChangelog(root, "--yes", adapter);
     expect(result.execution?.succeeded).toHaveLength(1); expect(result.execution?.error).toBeUndefined(); expect(result.plan?.changelog).toBeUndefined();
-    expect(output).toContain("Generated changelog: none"); expect(output).not.toContain("STALE-PLANNER-CONTENT");
+    expect(output).not.toContain("STALE-PLANNER-CONTENT"); expect(output).toContain("Fix behavior");
     expect(await readFile(join(root, "CHANGELOG.md"), "utf8")).toBe(originalChangelog);
     expect((await git(root, ["show", "HEAD:CHANGELOG.md"])).stdout.toString()).toBe(originalChangelog);
   });
