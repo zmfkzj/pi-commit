@@ -5,6 +5,7 @@
 ### Added
 
 - `/commit` now prints a start message (`pi-commit: analyzing changes and planning commits…`) right after the arguments are parsed, so you can see it started while the model plans.
+- `/commit` now offers argument completions for its options (`--dry-run`, `--model`, `--context`, `--no-changelog`, `--push`, `--yes`, `--help`); options already given are not offered again, and nothing is offered while a value, a quoted string or an escape is being typed.
 
 ### Fixed
 

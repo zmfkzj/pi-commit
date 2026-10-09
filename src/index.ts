@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { runCommitCommand } from "./command/run.js";
+import { completeCommitArguments } from "./command/completions.js";
 import { COMMIT_MESSAGE_TYPE, renderCommitMessage } from "./ui/render.js";
 
 /** Registration only: no I/O or session work while the extension factory loads. */
@@ -10,6 +11,7 @@ export default function commitExtension(pi: ExtensionAPI): void {
   if (typeof pi.registerMessageRenderer === "function") pi.registerMessageRenderer(COMMIT_MESSAGE_TYPE, renderCommitMessage);
   pi.registerCommand("commit", {
     description: "Plan and confirm single or hunk-split Git commits (/commit --help)",
+    getArgumentCompletions: completeCommitArguments,
     handler: async (args, ctx) => {
       if (running) { ctx.ui.notify("A /commit operation is already running.", "warning"); return; }
       running = true;
