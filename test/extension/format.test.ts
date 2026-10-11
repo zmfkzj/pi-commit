@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatExecution, formatPreview } from "../../src/ui/format.js";
+import { formatExecution, formatPreview, formatPushFailure } from "../../src/ui/format.js";
 import type { CommitGroup, CommitPlan } from "../../src/types.js";
 import { file, group, snapshot } from "../plan/fixtures.js";
 
@@ -65,5 +65,33 @@ describe("formatExecution result", () => {
     expect(partial).toBe(`Partial success; stopped.\ng1: ${oid1} Fix parser\nFailed group: g2 (Evil\\u001b[31m subject)\nError: hook failed\nRemaining: g2`);
     const failed = formatExecution({ succeeded: [], failedGroup: "g1", error: "boom", remainingGroups: ["g1", "g2"], restoredIndex: true, changelogRestored: true }, groups);
     expect(failed).toBe("Commit failed; stopped.\nFailed group: g1 (Fix parser)\nError: boom\nRemaining: g1, g2\nOriginal index restored.\nGenerated changelog restored.");
+  });
+});
+
+describe("formatPushFailure", () => {
+  test("authentication failure: commits stay local, Git reason shown, non-interactive auth hint, credentials redacted", () => {
+    const error = new Error("git push failed (128): fatal: could not read Username for 'https://github.com': terminal prompts disabled\nremote: https://user:s3cret@github.com/o/r.git \u001b[31m");
+    const text = formatPushFailure(error, 1);
+    expect(text).toStartWith("Push failed or refused; local commits remain (1 commit created locally). No retry, force push or history rollback performed.");
+    expect(text).toContain("Reason: git push failed (128): fatal: could not read Username for 'https://github.com': terminal prompts disabled");
+    expect(text).toContain("https://***@github.com/o/r.git");
+    expect(text).not.toContain("s3cret"); expect(text).not.toContain("\u001b");
+    expect(text).toContain("\\u001b");
+    expect(text).toContain("Authentication required");
+    expect(text).toContain("gh auth setup-git");
+    expect(text).toContain("ssh-agent");
+  });
+  test("SSH authentication failures also get the hint", () => {
+    for (const reason of ["git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.", "Host key verification failed."]) {
+      expect(formatPushFailure(new Error(reason), 2)).toContain("Authentication required");
+    }
+  });
+  test("non-authentication refusal shows its reason without the auth hint; long reasons are bounded", () => {
+    const text = formatPushFailure(new Error("Push refused: HEAD is detached; check out a branch with a configured upstream"), 2);
+    expect(text).toContain("(2 commits created locally)");
+    expect(text).toContain("Reason: Push refused: HEAD is detached");
+    expect(text).not.toContain("Authentication required");
+    const long = formatPushFailure(new Error(`! [rejected] main -> main (non-fast-forward) ${"x".repeat(2000)}`), 1);
+    expect(long.split("\n")[1]!.length).toBeLessThan(620);
   });
 });

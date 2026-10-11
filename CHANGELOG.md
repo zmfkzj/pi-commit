@@ -10,6 +10,7 @@
 ### Fixed
 
 - `/commit` previews of large diffs no longer crash the TUI (`Maximum call stack size exceeded` in Markdown rendering); `/commit` output is now rendered as plain text instead of Markdown.
+- `/commit --push` no longer freezes the TUI on a Git credential prompt (`Username for 'https://github.com':`): the push runs non-interactively (terminal prompts disabled, no controlling terminal), so missing credentials fail at once while credential helpers, askpass programs and ssh-agent keys still work. A failed push now says the commits were created locally, shows Git's reason and, for authentication failures, how to set up non-interactive auth.
 
 ### Changed
 

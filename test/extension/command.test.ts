@@ -273,6 +273,9 @@ describe("pipeline safety with real temporary Git repositories", () => {
     const root = await repo(); const { result, output } = await run(root, "--yes --push --no-changelog", mockModel(), context(root, false));
     expect(result.status).toBe("executed"); expect(result.execution?.succeeded).toHaveLength(1); expect(result.execution?.error).toBeUndefined();
     expect(result.error).toContain("Push failed or refused"); expect(result.pushed).toBeUndefined(); expect(output).toContain("local commits remain");
+    expect(output).toContain("Committed 1 commit:"); expect(result.error).toContain("(1 commit created locally)");
+    expect(result.error).toContain("Reason: Push refused: branch"); expect(result.error).toContain("has no configured upstream");
+    expect(result.error).not.toContain("Authentication required");
     expect((await git(root, ["rev-parse", "HEAD"])).stdout.toString().trim()).toBe(result.execution!.succeeded[0]!.oid);
     expect((await git(root, ["rev-list", "--count", "HEAD"])).stdout.toString().trim()).toBe("2");
     expect((await git(root, ["diff", "--cached"])).stdout.length).toBe(0);
@@ -282,9 +285,38 @@ describe("pipeline safety with real temporary Git repositories", () => {
     const { result, output } = await run(root, "--yes --push --no-changelog", mockModel(), context(root, false));
     expect(result.status).toBe("executed"); expect(result.execution?.succeeded).toHaveLength(1); expect(result.execution?.error).toBeUndefined();
     expect(result.error).toContain("Push failed or refused"); expect(output).toContain("local commits remain"); expect(result.pushed).toBeUndefined();
+    expect(result.error).toContain("Reason: Push refused: HEAD is detached"); expect(result.error).not.toContain("Authentication required");
     expect((await git(root, ["rev-parse", "HEAD"])).stdout.toString().trim()).toBe(result.execution!.succeeded[0]!.oid);
     expect((await git(root, ["rev-list", "--count", "HEAD"])).stdout.toString().trim()).toBe("2");
     expect(await readFile(join(root, "file.txt"), "utf8")).toBe(changed);
+  });
+  test("--push needing HTTPS credentials fails fast with an auth hint; the commit is reported as created and kept", async () => {
+    const root = await repo();
+    const branch = (await git(root, ["symbolic-ref", "--short", "HEAD"])).stdout.toString().trim();
+    await git(root, ["remote", "add", "origin", "pitest::https://github.com/example/repo.git"]);
+    await git(root, ["config", "branch." + branch + ".remote", "origin"]);
+    await git(root, ["config", "branch." + branch + ".merge", `refs/heads/${branch}`]);
+    // Fake remote helper (no network): asks Git for github.com credentials like the https transport does.
+    const bin = await mkdtemp(join(tmpdir(), "pi-commit-extension-helper-")); roots.push(bin);
+    await writeFile(join(bin, "git-remote-pitest"), "#!/bin/sh\nprintf 'protocol=https\\nhost=github.com\\n\\n' | git credential fill >/dev/null\nexit 1\n");
+    await chmod(join(bin, "git-remote-pitest"), 0o755);
+    const keys = ["PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_ASKPASS", "SSH_ASKPASS"] as const;
+    const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+    let outcome: Awaited<ReturnType<typeof run>>;
+    try {
+      Object.assign(process.env, { PATH: `${bin}:${saved.PATH}`, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
+      delete process.env.GIT_ASKPASS; delete process.env.SSH_ASKPASS;
+      outcome = await run(root, "--yes --push --no-changelog", mockModel(), context(root, false));
+    } finally { for (const key of keys) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]; } }
+    const { result, outputs } = outcome;
+    expect(result.status).toBe("executed"); expect(result.execution?.succeeded).toHaveLength(1); expect(result.pushed).toBeUndefined();
+    const committedAt = outputs.findIndex(text => text.startsWith("Committed 1 commit:"));
+    expect(committedAt).toBeGreaterThan(-1);
+    expect(outputs.at(-1)).toBe(result.error!);
+    expect(result.error).toStartWith("Push failed or refused; local commits remain (1 commit created locally).");
+    expect(result.error).toContain("terminal prompts disabled");
+    expect(result.error).toContain("Authentication required");
+    expect((await git(root, ["rev-parse", "HEAD"])).stdout.toString().trim()).toBe(result.execution!.succeeded[0]!.oid);
   });
   test("empty repo change set skips model call", async () => {
     const root = await repo(); await writeFile(join(root, "file.txt"), base);

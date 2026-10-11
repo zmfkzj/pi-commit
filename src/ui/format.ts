@@ -57,3 +57,26 @@ export function formatExecution(result: ExecutionResult, groups: CommitGroup[] =
   if (result.changelogRestored) output.push("Generated changelog restored.");
   return output.join("\n");
 }
+
+const AUTH_FAILURE = /terminal prompts disabled|could not read (?:Username|Password)|Authentication failed|Invalid username or (?:password|token)|Permission denied \(publickey|Host key verification failed|could not read from remote repository|returned error: 40[13]|No such device or address/i;
+
+/**
+ * Push failure after successful commits: states that the commits exist locally, why the push failed (credentials in
+ * URLs redacted, bounded, control characters escaped) and, for authentication failures, how to authenticate
+ * non-interactively. pi never answers a credential prompt itself.
+ */
+export function formatPushFailure(error: unknown, committed: number): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const lines = raw.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1***@").split("\n").map(line => line.trim()).filter(Boolean);
+  let reason = lines.slice(-6).join("\n");
+  if (reason.length > 600) reason = `…${reason.slice(-600)}`;
+  const output = [
+    `Push failed or refused; local commits remain (${committed} commit${committed === 1 ? "" : "s"} created locally). No retry, force push or history rollback performed.`,
+    `Reason: ${safeDisplay(reason || "unknown push error")}`,
+  ];
+  if (AUTH_FAILURE.test(raw)) {
+    output.push("Authentication required: pi-commit never waits for a Git username/password/passphrase prompt. " +
+      "Set up non-interactive auth (an HTTPS credential helper, e.g. `gh auth setup-git`, or an SSH remote with a key loaded in ssh-agent), then run `git push` in a shell.");
+  }
+  return output.join("\n");
+}

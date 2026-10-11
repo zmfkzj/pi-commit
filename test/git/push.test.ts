@@ -179,3 +179,91 @@ describe("explicit upstream-only non-force push", () => {
     expect(await refs(remote)).toBe(before);
   });
 });
+
+/**
+ * Regression: `/commit --push` froze the TUI on `Username for 'https://github.com':` because git push inherited pi's
+ * controlling terminal and Git's credential prompt reads /dev/tty. A fake remote helper (`pitest::` URL, no network)
+ * asks for HTTPS credentials exactly like the https transport does and records the environment it runs in.
+ */
+describe("push never waits for interactive authentication", () => {
+  const sessionOf = (stat: string) => stat.slice(stat.lastIndexOf(")") + 2).trim().split(" ")[3];
+  async function authFixture(credentialHelper?: string) {
+    const { root, remote } = await fixture();
+    const bin = await temporary("pi-commit-push-helper-"), record = await temporary("pi-commit-push-record-");
+    const helper = join(bin, "git-remote-pitest");
+    await writeFile(helper, `#!/bin/sh
+printf '%s\\n' "\${GIT_TERMINAL_PROMPT-unset}" > "${record}/prompt"
+printf '%s\\n' "\${GIT_SSH_COMMAND-unset}|\${SSH_AUTH_SOCK-unset}" > "${record}/ssh"
+cat /proc/$$/stat > "${record}/stat" 2>/dev/null
+if (: </dev/tty) 2>/dev/null; then echo yes > "${record}/tty"; else echo no > "${record}/tty"; fi
+printf 'protocol=https\\nhost=github.com\\n\\n' | git credential fill > "${record}/fill-out"
+echo $? > "${record}/fill-code"
+exit 1
+`);
+    await chmod(helper, 0o755);
+    await git(root, ["config", "remote.origin.url", "pitest::https://github.com/example/repo.git"]);
+    if (credentialHelper) await git(root, ["config", "credential.helper", credentialHelper]);
+    const next = await commit(root, "file", "needs auth\n");
+    return { root, remote, bin, record, next };
+  }
+  async function withIsolatedEnv<T>(bin: string, run: () => Promise<T>): Promise<T> {
+    const keys = ["PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_TERMINAL_PROMPT", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK"] as const;
+    const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+    try {
+      // Never consult the developer's real credential helpers or askpass programs.
+      Object.assign(process.env, { PATH: `${bin}:${saved.PATH}`, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
+        GIT_SSH_COMMAND: "ssh -o PiCommitTest=yes", SSH_AUTH_SOCK: "/nonexistent/pi-commit-agent.sock" });
+      delete process.env.GIT_ASKPASS; delete process.env.SSH_ASKPASS; delete process.env.GIT_TERMINAL_PROMPT;
+      return await run();
+    } finally {
+      for (const key of keys) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]; }
+    }
+  }
+
+  test("missing HTTPS credentials fail fast without a terminal prompt or controlling terminal; local commit kept", async () => {
+    const { root, remote, bin, record, next } = await authFixture();
+    const remoteBefore = await refs(remote);
+    const started = Date.now();
+    await withIsolatedEnv(bin, async () => {
+      await expect(pushRepository(root)).rejects.toThrow("terminal prompts disabled");
+      expect(process.env.GIT_TERMINAL_PROMPT).toBeUndefined(); // the parent (pi) environment is not mutated
+    });
+    expect(Date.now() - started).toBeLessThan(4000);
+    expect((await readFile(join(record, "prompt"), "utf8")).trim()).toBe("0");
+    expect((await readFile(join(record, "fill-code"), "utf8")).trim()).not.toBe("0");
+    expect((await readFile(join(record, "tty"), "utf8")).trim()).toBe("no");
+    // Existing SSH configuration and agent socket are passed through untouched.
+    expect((await readFile(join(record, "ssh"), "utf8")).trim()).toBe("ssh -o PiCommitTest=yes|/nonexistent/pi-commit-agent.sock");
+    if (process.platform === "linux") {
+      // Git runs in its own session (setsid): it cannot reach pi's controlling terminal even when pi has one.
+      const own = sessionOf(await readFile("/proc/self/stat", "utf8"));
+      const child = sessionOf(await readFile(join(record, "stat"), "utf8"));
+      expect(child).toBeDefined(); expect(child).not.toBe(own);
+    }
+    expect(await ref(root, "HEAD")).toBe(next);
+    expect(await refs(remote)).toBe(remoteBefore);
+  });
+
+  test("a configured credential helper still authenticates non-interactively", async () => {
+    const { root, bin, record } = await authFixture("!f() { echo username=stored-user; echo password=stored-pass; }; f");
+    await withIsolatedEnv(bin, async () => { await expect(pushRepository(root)).rejects.toThrow("git push failed"); });
+    expect((await readFile(join(record, "fill-code"), "utf8")).trim()).toBe("0");
+    expect(await readFile(join(record, "fill-out"), "utf8")).toContain("username=stored-user");
+  });
+
+  test("only git push runs non-interactively; read-only probes and commits keep the inherited environment", async () => {
+    const { root } = await fixture();
+    const bin = await temporary("pi-commit-push-git-"), realGit = Bun.which("git")!, log = join(bin, "calls");
+    const wrapper = join(bin, "git");
+    await writeFile(wrapper, `#!/bin/sh\nsub=""\nfor arg in "$@"; do case "$arg" in -c|core.*|push.*|remote.*) ;; *) sub="$arg"; break;; esac; done\nprintf '%s %s\\n' "$sub" "\${GIT_TERMINAL_PROMPT-unset}" >> "${log}"\nexec "${realGit}" "$@"\n`);
+    await chmod(wrapper, 0o755);
+    await commit(root, "file", "next\n");
+    const originalPath = process.env.PATH, originalPrompt = process.env.GIT_TERMINAL_PROMPT;
+    try { process.env.PATH = `${bin}:${originalPath}`; delete process.env.GIT_TERMINAL_PROMPT; await pushRepository(root); }
+    finally { process.env.PATH = originalPath; if (originalPrompt === undefined) delete process.env.GIT_TERMINAL_PROMPT; else process.env.GIT_TERMINAL_PROMPT = originalPrompt; }
+    const calls = (await readFile(log, "utf8")).trim().split("\n");
+    expect(calls).toContain("push 0");
+    expect(calls.filter(call => !call.startsWith("push ")).every(call => call.endsWith(" unset"))).toBe(true);
+    expect(calls.filter(call => call.startsWith("push "))).toEqual(["push 0"]);
+  });
+});

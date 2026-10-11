@@ -109,6 +109,10 @@ custom message(일반 텍스트로 렌더링)로 전달합니다. print 모드�
    거부하며, 서브모듈을 자동으로 push하지 않습니다. detached HEAD, 누락/모호/안전하지 않은 upstream이면 거부하며,
    non-fast-forward도 거부합니다. push 거부/실패를 보고하고 성공한 로컬 커밋은 그대로
    남겨 둡니다. history reset이나 자동 재시도는 하지 않습니다.
+   push는 비대화형으로 실행됩니다(`GIT_TERMINAL_PROMPT=0`, POSIX에서는 제어 터미널 없는 새 세션).
+   Git/ssh가 pi TUI의 터미널에서 사용자명·비밀번호·passphrase를 묻지 않고 즉시 실패하며,
+   저장된 자격증명, credential helper(예: `gh auth setup-git`), askpass, ssh-agent 키는 그대로 사용됩니다.
+   인증 실패 시 커밋은 로컬에 생성되었다는 사실, Git 오류 사유, 인증 설정 안내를 함께 표시합니다.
 
 확장은 프로세스 내부에서 사용자 권한으로 동작합니다. Git hooks, signing 프로그램,
 필터와 외부 프로세스는 신뢰한 사용자 코드이며 샌드박스가 아닙니다. hook이 파일/tree를

@@ -7,7 +7,7 @@ import { validatePlan } from "../plan/validate.js";
 import { createModelAdapter } from "../plan/model.js";
 import { buildChangelogPreview, detectChangelog } from "../changelog/index.js";
 import { HELP, parseCommitArgs } from "./args.js";
-import { formatExecution, formatPreview, safeDisplay } from "../ui/format.js";
+import { formatExecution, formatPreview, formatPushFailure, safeDisplay } from "../ui/format.js";
 
 export type CommitContext = Pick<ExtensionCommandContext, "cwd" | "mode" | "hasUI" | "model" | "signal"> & {
   modelRegistry: Pick<ExtensionCommandContext["modelRegistry"], "find" | "streamSimple">;
@@ -102,7 +102,7 @@ export async function runCommitCommand(args: string, ctx: CommitContext, service
     services.output(formatExecution(execution, validation.orderedGroups), execution.error ? "error" : "info");
     if (options.push && !execution.error && !execution.remainingGroups.length && execution.succeeded.length === plan.groups.length) {
       try { await pushRepository(snapshot.root!); result.pushed = true; services.output("Push completed."); }
-      catch { result.error = "Push failed or refused; local commits remain. No retry, force push or history rollback performed."; services.output(result.error, "error"); }
+      catch (pushError) { result.error = formatPushFailure(pushError, execution.succeeded.length); services.output(result.error, "error"); }
     }
     return result;
   } catch (error) {
