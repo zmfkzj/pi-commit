@@ -14,6 +14,8 @@
 
 ### Changed
 
+- Development and tests run on Pi 1.2.0: `@earendil-works/pi-coding-agent`, `pi-ai` and `pi-tui` devDependencies 1.0.0 → 1.2.0 (`bun.lock` updated, which now also lists `pi-tui`); the `*` peer ranges are unchanged and no code changed.
+
 - Raised the default commit planning timeout from 120 to 300 seconds.
 - A committing `/commit` run no longer prints the file-level plan summary to the transcript; the result lists each new commit as its short hash and message (`Committed N commits:`) instead of group IDs and full hashes. The plan summary is still shown by `--dry-run`, in the confirmation dialog and when writes are refused, and failure output keeps full hashes, the failed/remaining groups and the error.
 
