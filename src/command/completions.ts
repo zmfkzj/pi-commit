@@ -1,7 +1,8 @@
 /**
  * Argument completions for `/commit`. Pi passes everything after `/commit ` and replaces it with the chosen value, so each candidate keeps
  * the text before the option being typed and appends the completed option. Options already given are not offered again (the parser
- * rejects duplicates); nothing is offered while a value, a quoted string or an escape is being typed.
+ * rejects duplicates); nothing is offered while a value, a quoted string or an escape is being typed. The `doctor` / `install-deps`
+ * subcommands are offered only as the first word, and nothing follows them.
  */
 export interface CommandCompletion { value: string; label: string; description?: string }
 
@@ -16,6 +17,11 @@ export const COMMIT_OPTIONS: readonly OptionSpec[] = [
   { flag: "--help", description: "Show /commit help" },
 ];
 const VALUE_FLAGS = new Set(COMMIT_OPTIONS.filter(option => option.takesValue).map(option => option.flag));
+/** Subcommands, offered only as the first word (after them nothing else is accepted). */
+export const COMMIT_SUBCOMMANDS: readonly { name: string; description: string }[] = [
+  { name: "doctor", description: "Check Git, identity, work tree and model (read-only)" },
+  { name: "install-deps", description: "Show what to set up (nothing installs automatically)" },
+];
 
 interface Token { start: number; value: string }
 /** Mirrors tokenizeArgs, but never throws: an open quote or a trailing escape is reported instead. */
@@ -59,12 +65,15 @@ export function completeCommitArguments(prefix: string): CommandCompletion[] | n
       i++;
     }
   }
-  if (typed.includes("=") || (typed !== "" && !typed.startsWith("-"))) return null;
-  const items = COMMIT_OPTIONS.filter(option => !used.has(option.flag) && option.flag.startsWith(typed)).map(option => ({
+  if (tokens.length > 0 && COMMIT_SUBCOMMANDS.some(sub => sub.name === tokens[0]!.value)) return null; // takes no arguments
+  const subcommands = tokens.length > 0 || typed.startsWith("-") ? [] : COMMIT_SUBCOMMANDS.filter(sub => sub.name.startsWith(typed))
+    .map(sub => ({ value: `${prefix.slice(0, start)}${sub.name}`, label: sub.name, description: sub.description }));
+  const options = typed.includes("=") || (typed !== "" && !typed.startsWith("-")) ? [] : COMMIT_OPTIONS.filter(option => !used.has(option.flag) && option.flag.startsWith(typed)).map(option => ({
     value: `${prefix.slice(0, start)}${option.flag}${option.takesValue ? " " : ""}`,
     label: option.takesValue ? `${option.flag} <${option.flag === "--model" ? "provider/id" : "text"}>` : option.flag,
     description: option.description,
   }));
+  const items = [...options, ...subcommands];
   if (items.length === 0 || (items.length === 1 && items[0]!.value === prefix)) return null;
   return items;
 }

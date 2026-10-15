@@ -79,6 +79,39 @@ custom message(일반 텍스트로 렌더링)로 전달합니다. print 모드�
 커밋을 실행하는 경우 transcript에는 파일별 계획 요약을 남기지 않고 커밋 메시지 중심의 결과만 표시합니다.
 실패/부분 성공 시에는 성공한 전체 OID, 실패 그룹, 오류, 남은 그룹, 복원 여부를 그대로 보고합니다.
 
+## 의존성 점검 / 설치 (`/commit doctor`, `/commit install-deps`)
+
+```text
+/commit doctor        # 읽기 전용 상태 점검
+/commit install-deps  # 설치 안내: 자동 설치 항목 없음, 필요한 수동 조치를 정확한 명령으로 보고
+```
+
+**하위 명령 형식을 고른 이유:** `/commit`은 위치 인자를 받지 않습니다(모든 맨 단어는
+`Unknown /commit option` 오류). 따라서 첫 단어 `doctor`/`install-deps`는 기존에 유효했던 입력의 의미를
+바꾸지 않습니다. 자유 텍스트는 `--context` 값으로만 들어가므로 `/commit --context doctor`는 지금도
+계획 지시로 해석됩니다. 두 하위 명령은 인자를 받지 않으며(`/commit doctor --dry-run`은 오류),
+첫 단어로만 자동완성에 제시됩니다. 결과는 `/commit`의 기존 출력 경로(`pi-commit` 일반 텍스트
+custom message, print 모드 stderr, 경고·오류는 알림)로 표시합니다. umbrella의
+`/oh-my-pi doctor|install-deps`도 같은 provider(`pi-commit`)를 `oh-my-pi-extensions:dependencies`
+이벤트 채널로 호출합니다.
+
+`doctor`가 점검하는 항목 (모두 필수, 각 프로브는 5초 제한, 아무것도 쓰지 않음):
+
+| 항목 | 정상 | 비정상 시 |
+|---|---|---|
+| `git` | `git --version`이 2.31 이상 (`git rev-parse --path-format=absolute` 사용) | `error` + 플랫폼별 설치 안내 |
+| Git identity | 현재 디렉터리 기준 `git var GIT_AUTHOR_IDENT`/`GIT_COMMITTER_IDENT` 성공 (저장소 로컬 설정·`GIT_AUTHOR_*` 환경변수 포함) | `error` + `git config --global user.name "Your Name"` / `user.email` 명령. 자동 감지된 identity는 `ok`이지만 설정 명령을 함께 안내 |
+| Git work tree (현재 디렉터리) | `git rev-parse --show-toplevel` 성공 | 사용 시점 조건이므로 패키지 오류가 아닌 `unverified` + 확인 명령 (dubious ownership이면 `safe.directory` 안내) |
+| planning model | 현재 모델이 있고 `modelRegistry.hasConfiguredAuth()`가 참 | `error` + `/model`, `/login`/API 키 안내. 키 값은 출력하지 않고 "set"/"not set"만 표시 |
+
+npm 런타임 의존성은 없습니다(pi 패키지들은 peer dependency). 보고서 note에 이를 명시합니다.
+
+`install-deps`는 **아무것도 자동 설치하지 않습니다**: Git 설치(sudo/시스템 패키지 관리자), Git identity
+설정, 모델 자격 증명은 모두 사용자 몫이므로 `manual`과 정확한 명령으로 보고하고, 이미 갖춰진 항목은
+`ok`("already available")로 표시합니다. `git config`를 임의로 쓰지 않으며 반복 실행해도 안전합니다
+(동시 실행은 진행 중인 실행 하나를 공유). work tree는 설치 대상이 아니므로 `install-deps`에는 나오지 않습니다.
+Git 설치 안내는 Linux(apt/dnf), macOS(`xcode-select --install`/brew), Windows(`winget`)를 구분합니다.
+
 ## 선택 및 안전 모델
 
 1. staged 변경이 하나라도 있으면 **HEAD→index만** 계획합니다. 해당 파일의 unstaged
@@ -165,7 +198,8 @@ bun test
 커밋하거나 push하지 않습니다. 주요 검증: staged/unstaged 보존, 빈 index 분석,
 동일 파일 순방향/역방향 hunk 분할, 의존성/cycle/lockfile, 특수 경로, 신설/삭제/rename/
 binary/mode/submodule, drift, dry-run/cancel/no-confirm, hook 첫/후속 실패,
-changelog 보존·merge, 모델 실패/재시도, 공개 pi loader smoke.
+changelog 보존·merge, 모델 실패/재시도, 공개 pi loader smoke, `doctor`/`install-deps`
+(격리된 `HOME`/`GIT_CONFIG_GLOBAL`과 가짜 `git` 스크립트, 실제 설정·설치 없음).
 
 주요 코드: `src/git/`, `src/plan/`, `src/changelog/`, `src/command/`, `src/ui/`.
 

@@ -9,6 +9,7 @@ export interface CommitOptions {
 }
 
 export const HELP = `/commit [--dry-run] [--model provider/id] [--context "instructions"] [--no-changelog] [--push] [--yes]
+/commit doctor | /commit install-deps
 Plan a single or hunk-split commit, confirm the plan summary (no diffs) in a dialog (or skip it with --yes), then report each commit's message.
 --dry-run       Show the plan summary only; never change index, files, history or remote.
 --model         Exact registered provider/id; otherwise use the current pi model.
@@ -16,7 +17,27 @@ Plan a single or hunk-split commit, confirm the plan summary (no diffs) in a dia
 --no-changelog  Do not generate a changelog (existing edits remain in the plan).
 --push          Push only after every planned commit succeeds; never force push.
 --yes           Skip the confirmation dialog and execute the validated plan directly (all modes); --dry-run still never writes.
---help          Show this help. Without --yes, interactive/RPC modes ask for confirmation and print/JSON modes refuse to write.`;
+--help          Show this help. Without --yes, interactive/RPC modes ask for confirmation and print/JSON modes refuse to write.
+doctor          Check Git, the Git identity, the current directory's work tree and the planning model (read-only).
+install-deps    Report what to set up; nothing is installed automatically (Git, identity and credentials are manual).`;
+
+export type CommitSubcommand = "doctor" | "install-deps";
+export const SUBCOMMANDS: readonly CommitSubcommand[] = ["doctor", "install-deps"];
+
+/**
+ * `doctor` / `install-deps` as the first word. /commit takes no positional arguments (any bare word is an
+ * "Unknown /commit option" error), so these words cannot change the meaning of previously valid input; a
+ * `--context doctor` value stays a value. Returns undefined for everything else (including tokenizer errors, which
+ * parseCommitArgs reports as before).
+ */
+export function parseSubcommand(input: string): CommitSubcommand | undefined {
+  let args: string[];
+  try { args = tokenizeArgs(input); } catch { return undefined; }
+  const first = args[0] as CommitSubcommand | undefined;
+  if (!first || !SUBCOMMANDS.includes(first)) return undefined;
+  if (args.length > 1) throw new Error(`/commit ${first} takes no arguments.`);
+  return first;
+}
 
 /** Shell-like quoting for slash-command arguments; no shell is ever evaluated. */
 export function tokenizeArgs(input: string): string[] {

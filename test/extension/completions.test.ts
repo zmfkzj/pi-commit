@@ -3,7 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import commitExtension from "../../src/index.js";
 import { parseCommitArgs } from "../../src/command/args.js";
-import { COMMIT_OPTIONS, completeCommitArguments } from "../../src/command/completions.js";
+import { COMMIT_OPTIONS, COMMIT_SUBCOMMANDS, completeCommitArguments } from "../../src/command/completions.js";
 
 const values = (prefix: string) => completeCommitArguments(prefix)?.map(item => item.value) ?? null;
 const allFlags = COMMIT_OPTIONS.map(option => option.flag);
@@ -23,7 +23,7 @@ function load() {
 describe("/commit argument completions", () => {
   test("offers every option on empty input, without duplicates", () => {
     const all = values("")!;
-    expect(all).toEqual(COMMIT_OPTIONS.map(option => option.flag + (option.takesValue ? " " : "")));
+    expect(all).toEqual([...COMMIT_OPTIONS.map(option => option.flag + (option.takesValue ? " " : "")), ...COMMIT_SUBCOMMANDS.map(sub => sub.name)]);
     expect(new Set(all).size).toBe(all.length);
   });
 

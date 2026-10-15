@@ -4,6 +4,7 @@
 
 ### Added
 
+- `/commit doctor` checks pi-commit's runtime prerequisites read-only (Git ≥ 2.31 on PATH, a Git author/committer identity for the current directory, whether the current directory is a Git work tree, a selected planning model with credentials configured) and says what to do for each problem; `/commit install-deps` reports the same requirements as manual steps (pi-commit has no npm runtime dependencies and never installs Git or writes `git config`). Both are offered as first-word completions, take no arguments, and answer the umbrella's `/oh-my-pi doctor|install-deps` through the `oh-my-pi-extensions:dependencies` event channel (`src/dependencies.ts`). Existing `/commit` input keeps its meaning: bare words were always rejected, and `--context doctor` is still a planning instruction.
 - `/commit` now prints a start message (`pi-commit: analyzing changes and planning commits…`) right after the arguments are parsed, so you can see it started while the model plans.
 - `/commit` now offers argument completions for its options (`--dry-run`, `--model`, `--context`, `--no-changelog`, `--push`, `--yes`, `--help`); options already given are not offered again, and nothing is offered while a value, a quoted string or an escape is being typed.
 
