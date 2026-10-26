@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { ModelAdapter, ModelMessage, ModelResponse } from "../../src/types.js";
-import { planCommits } from "../../src/plan/planner.js";
+import type { FileChange, ModelAdapter, ModelMessage, ModelResponse, RepoSnapshot } from "../../src/types.js";
+import { planCommits, type EvidenceReport } from "../../src/plan/planner.js";
+import { parseHunks } from "../../src/git/snapshot.js";
 import { file, group, plan, snapshot } from "./fixtures.js";
 
 function mock(responses: (ModelResponse | Error)[]): { adapter: ModelAdapter; calls: ModelMessage[][] } {
@@ -83,14 +84,12 @@ describe("bounded model-backed strict JSON planner", () => {
     controller.abort();
     await expect(pending).rejects.toThrow("cancelled or timed out");
   });
-  test("invalid limits and empty/oversized snapshot rejected before model calls", async () => {
+  test("invalid limits and empty snapshot rejected before model calls", async () => {
     const { adapter, calls } = mock([valid()]);
     await expect(planCommits(snapshot(), adapter, { maxAttempts: 0 })).rejects.toThrow("maxAttempts");
     await expect(planCommits(snapshot(), adapter, { timeoutMs: 0 })).rejects.toThrow("timeoutMs");
+    for (const evidenceBudgetBytes of [0, 1.5, 1_000_001, Number.NaN]) await expect(planCommits(snapshot(), adapter, { evidenceBudgetBytes })).rejects.toThrow("evidenceBudgetBytes");
     await expect(planCommits(snapshot([]), adapter)).rejects.toThrow("No changes");
-    const huge = snapshot(); huge.files[0]!.hunks[0]!.lines = ["x".repeat(1_000_001)];
-    await expect(planCommits(huge, adapter)).rejects.toThrow("evidence limit");
-    await expect(planCommits(huge, adapter)).rejects.toThrow("src/a.ts");
     expect(calls).toHaveLength(0);
   });
   test("hunk-splittable content is sent once, in git_hunk, with only the diff header in git_file_diff", async () => {
@@ -176,14 +175,14 @@ describe("bounded model-backed strict JSON planner", () => {
     expect(input.git_file_diff["bun.lock"]).toBe("[machine-generated/binary: whole-file selection only]");
     expect(input.git_hunk).toEqual([]);
   });
-  test("evidence limit error lists the largest files without leaking content", async () => {
+  test("evidence limit error (metadata alone over budget) lists the largest files without leaking content", async () => {
     const sizes: [string, number][] = [["src/f1.ts", 300_000], ["src/f2.ts", 250_000], ["src/f3.ts", 200_000], ["src/f4.ts", 150_000], ["src/f5.ts", 100_000], ["src/tiny.ts", 50_000]];
     const files = sizes.map(([path, size]) => {
       const change = file(path); change.hunks = [{ ...change.hunks[0]!, lines: [`+secret-${"z".repeat(size)}`] }];
       return change;
     });
     const { adapter, calls } = mock([valid()]);
-    const error = await planCommits(snapshot(files.reverse()), adapter).then(() => undefined, (caught: Error) => caught);
+    const error = await planCommits(snapshot(files.reverse()), adapter, { evidenceBudgetBytes: 500 }).then(() => undefined, (caught: Error) => caught);
     expect(error).toBeInstanceOf(Error);
     const message = error!.message;
     expect(message).toContain("evidence limit");
@@ -198,5 +197,164 @@ describe("bounded model-backed strict JSON planner", () => {
     expect(message).not.toContain("secret");
     expect(message).not.toContain("zzzz");
     expect(calls).toHaveLength(0);
+  });
+});
+
+/** A replay of the reported orche shape: 456 new untracked files plus 21 modified files (~2.6 MB of normal evidence). */
+function largeChangeSet(newFiles = 456, modified = 21): RepoSnapshot {
+  const files: FileChange[] = [], diffByFile: Record<string, string> = {};
+  for (let i = 0; i < newFiles; i++) {
+    const path = `fixtures/advisor-bench/case-${String(i).padStart(3, "0")}/witness.json`;
+    const body = Array.from({ length: 75 }, (_, line) => `+  "line-${line}": "value ${i}-${line} \\"quoted\\" 가나다",`).join("\n");
+    const diff = `diff --git a/${path} b/${path}\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,75 @@\n${body}\n`;
+    diffByFile[path] = diff;
+    files.push({ path, status: "added", binary: false, isLockfile: false, untracked: true, origin: "unstaged", hunkSplittable: false, hunks: parseHunks(path, diff) });
+  }
+  for (let i = 0; i < modified; i++) {
+    const path = `src/module-${i}.ts`;
+    const change = file(path);
+    change.hunks = Array.from({ length: 6 }, (_, n) => ({ ...change.hunks[0]!, id: `${path}#${n + 1}`, header: `@@ -${n * 100},20 +${n * 100},20 @@ function f${n}()`, lines: Array.from({ length: 30 }, (_, line) => `${line % 2 ? "+" : "-"}  const value${line} = compute(${n}, ${line}); // tab\t"q"`) }));
+    diffByFile[path] = `diff --git a/${path} b/${path}\nindex 1..2 100644\n--- a/${path}\n+++ b/${path}\n${change.hunks.map(hunk => [hunk.header, ...hunk.lines].join("\n")).join("\n")}\n`;
+    files.push(change);
+  }
+  return { files, mode: "worktree", headOid: "abc", fingerprint: "hash", diffByFile };
+}
+/** A deterministic model that plans from the evidence it was shown: one group per modified file, one for all new files. */
+function evidenceModel(): { adapter: ModelAdapter; calls: ModelMessage[][] } {
+  const calls: ModelMessage[][] = [];
+  return { calls, adapter: { async complete(messages) {
+    calls.push(messages.map(message => ({ ...message })));
+    const files = (JSON.parse(messages[1]!.content) as { git_overview: { files: { path: string; status: string }[] } }).git_overview.files;
+    const added = files.filter(entry => entry.status === "added").map(entry => ({ path: entry.path, hunks: "all" }));
+    const groups = files.filter(entry => entry.status === "modified").map((entry, index) => ({ id: `m${index}`, message: { subject: `Update ${entry.path}` }, selectors: [{ path: entry.path, hunks: "all" }], dependsOn: [] }));
+    if (added.length) groups.push({ id: "fixtures", message: { subject: "Add fixtures" }, selectors: added, dependsOn: [] });
+    return { text: JSON.stringify({ groups }) };
+  } } };
+}
+const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+describe("change sets above the 1 MB evidence budget are planned from condensed evidence", () => {
+  test("reported shape (477 files, ~2.6 MB): one model call, every path and hunk ID listed, bounded and disclosed", async () => {
+    const snap = largeChangeSet(), before = structuredClone(snap);
+    const reports: EvidenceReport[] = [];
+    const { adapter, calls } = evidenceModel();
+    const result = await planCommits(snap, adapter, { onEvidence: report => reports.push(report) });
+    expect(calls).toHaveLength(1);
+    expect(reports).toHaveLength(1);
+    const report = reports[0]!;
+    expect(report.fullBytes).toBeGreaterThan(2_400_000);
+    expect(report).toMatchObject({ condensed: true, budgetBytes: 1_000_000, files: 477, hunks: 456 + 21 * 6 });
+    expect(report.sentBytes).toBeLessThanOrEqual(1_000_000);
+    expect(report.sentBytes).toBeGreaterThan(900_000); // the budget is used, not wasted
+    expect(report.truncatedItems).toBeGreaterThan(0);
+    const content = calls[0]![1]!.content;
+    expect(Buffer.byteLength(content, "utf8")).toBe(report.sentBytes);
+    const input = JSON.parse(content);
+    expect(input.git_overview.files.map((entry: { path: string }) => entry.path)).toEqual(snap.files.map(entry => entry.path));
+    expect(input.git_overview.files.flatMap((entry: { hunks: { id: string }[] }) => entry.hunks.map(hunk => hunk.id))).toEqual(snap.files.flatMap(entry => entry.hunks.map(hunk => hunk.id)));
+    expect(Object.keys(input.git_file_diff)).toEqual(snap.files.map(entry => entry.path));
+    expect(input.git_hunk.flatMap((entry: { hunks: { id: string }[] }) => entry.hunks.map(hunk => hunk.id))).toHaveLength(21 * 6);
+    expect(input.git_file_diff["fixtures/advisor-bench/case-000/witness.json"]).toContain("[whole-file-only: truncated");
+    expect(calls[0]![0]!.content).toContain("CONDENSED");
+    expect(calls[0]![0]!.content).toContain(`about ${report.contentCapBytes} bytes`);
+    expect(content).not.toContain("\uFFFD");
+    expect(lone.test(content)).toBe(false);
+    expect(result.groups).toHaveLength(22);
+    expect(result.groups.flatMap(group => group.selectors.map(selector => selector.path)).sort()).toEqual(snap.files.map(entry => entry.path).sort());
+    expect(snap).toEqual(before); // execution data (full diffs and hunks) is never mutated
+  });
+  test("normal evidence: exactly at the budget is sent unchanged; one byte over is condensed", async () => {
+    const sized = (padding: number) => { const snap = snapshot(); snap.files[0]!.hunks[0]!.lines = [`+${"x".repeat(padding)}`]; return snap; };
+    const measure = async (snap: RepoSnapshot) => { const reports: EvidenceReport[] = []; const { adapter, calls } = mock([valid()]); await planCommits(snap, adapter, { onEvidence: report => reports.push(report) }); return { report: reports[0]!, calls }; };
+    const probe = (await measure(sized(500_000))).report.fullBytes;
+    const exact = await measure(sized(500_000 + 1_000_000 - probe));
+    expect(exact.report).toMatchObject({ condensed: false, fullBytes: 1_000_000, sentBytes: 1_000_000, truncatedItems: 0 });
+    expect(exact.report.contentCapBytes).toBeUndefined();
+    expect(exact.calls[0]![0]!.content).not.toContain("CONDENSED");
+    expect(JSON.parse(exact.calls[0]![1]!.content).git_hunk[0].hunks[0]).not.toHaveProperty("truncated");
+    const over = await measure(sized(500_000 + 1_000_001 - probe));
+    expect(over.report).toMatchObject({ condensed: true, fullBytes: 1_000_001, truncatedItems: 1 });
+    expect(over.report.sentBytes).toBeLessThanOrEqual(1_000_000);
+    const hunk = JSON.parse(over.calls[0]![1]!.content).git_hunk[0].hunks[0];
+    expect(hunk.truncated).toEqual({ totalLines: 1, totalBytes: 500_000 + 1_000_001 - probe + 2 });
+    expect(over.calls[0]![0]!.content).toContain("CONDENSED");
+  });
+  test("one enormous multi-byte/escaped line is cut at a code-point boundary and stays within budget", async () => {
+    const snap = snapshot();
+    snap.files[0]!.hunks[0]!.lines = [`+${"가\"\\😀é\n".repeat(250_000)}`];
+    const reports: EvidenceReport[] = [];
+    const { adapter, calls } = mock([valid()]);
+    expect(await planCommits(snap, adapter, { onEvidence: report => reports.push(report) })).toEqual(plan());
+    const content = calls[0]![1]!.content;
+    expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(1_000_000);
+    expect(reports[0]!.condensed).toBe(true);
+    expect(content).not.toContain("\uFFFD");
+    expect(lone.test(content)).toBe(false);
+    const shown: string = JSON.parse(content).git_hunk[0].hunks[0].lines[0];
+    expect(shown.startsWith("+가\"\\😀é")).toBe(true);
+    expect(shown.length).toBeGreaterThan(1000);
+  });
+  test("metadata alone over the 1 MB budget (20,000 files) is rejected before any model call", async () => {
+    const files = Array.from({ length: 20_000 }, (_, i) => file(`packages/generated/some-long-directory-name/file-${i}.ts`, { status: "added", hunkSplittable: false, hunks: [] }));
+    const { adapter, calls } = mock([valid()]);
+    await expect(planCommits(snapshot(files), adapter)).rejects.toThrow("even when condensed to paths, statuses and hunk headers (20000 files");
+    expect(calls).toHaveLength(0);
+  });
+  test("oversized user context counts toward the budget and is never cut", async () => {
+    const { adapter, calls } = mock([valid()]);
+    await expect(planCommits(snapshot(), adapter, { context: "c".repeat(1_000_000) })).rejects.toThrow("evidence limit");
+    expect(calls).toHaveLength(0);
+  });
+  test("a lowered model budget condenses earlier; staged mode is reported to the model unchanged", async () => {
+    const snap = largeChangeSet(40, 2); snap.mode = "staged";
+    for (const entry of snap.files) entry.origin = "staged";
+    const reports: EvidenceReport[] = [];
+    const { adapter, calls } = evidenceModel();
+    await planCommits(snap, adapter, { evidenceBudgetBytes: 100_000, onEvidence: report => reports.push(report) });
+    expect(reports[0]).toMatchObject({ condensed: true, budgetBytes: 100_000, files: 42 });
+    expect(Buffer.byteLength(calls[0]![1]!.content, "utf8")).toBeLessThanOrEqual(100_000);
+    expect(JSON.parse(calls[0]![1]!.content).git_overview.mode).toBe("staged");
+  });
+  test("condensed plans are still validated globally: omitted, duplicate and split lockfile selections are retried with bounded feedback", async () => {
+    const snap = largeChangeSet();
+    const manifest = file("package.json"), lock = file("package-lock.json", { isLockfile: true });
+    snap.files.push(manifest, lock); snap.diffByFile["package.json"] = "diff"; snap.diffByFile["package-lock.json"] = "diff";
+    const first = snap.files[0]!.path;
+    const partial = plan([group("g1", first), group("g2", first)]); // duplicate, and ~480 files missing
+    const splitLock = plan([...snap.files.filter(entry => entry.path !== "package-lock.json").map((entry, i) => group(`g${i}`, entry.path)), group("deps", "package-lock.json")]);
+    const good = plan([{ ...group("all"), selectors: snap.files.map(entry => ({ path: entry.path, hunks: "all" as const })) }]);
+    const { adapter, calls } = mock([{ text: JSON.stringify(partial) }, { text: JSON.stringify(splitLock) }, { text: JSON.stringify(good) }]);
+    expect((await planCommits(snap, adapter)).groups).toHaveLength(1);
+    expect(calls).toHaveLength(3);
+    const feedback = calls[1]!.at(-1)!.content;
+    expect(feedback).toContain("overlap");
+    expect(feedback).toContain("more validation errors (missing_coverage");
+    expect(feedback.length).toBeLessThan(8_300);
+    expect(calls[2]!.at(-1)!.content).toContain("lockfile_group");
+  });
+  test("exhausted retries on a condensed set fail without a partial plan and with bounded feedback", async () => {
+    const snap = largeChangeSet();
+    const partial = { text: JSON.stringify(plan([group("g1", snap.files[0]!.path)])) };
+    const { adapter, calls } = mock([partial, partial, partial]);
+    const error = await planCommits(snap, adapter).then(() => undefined, (caught: Error) => caught);
+    expect(error?.message).toContain("failed after 3 attempts");
+    expect(error!.message.length).toBeLessThan(8_400);
+    expect(calls).toHaveLength(3);
+    expect(calls[2]!.reduce((total, message) => total + message.content.length, 0)).toBeLessThan(1_000_000 + 30_000);
+  });
+  test("cancellation and deadline still apply to a condensed plan", async () => {
+    const never: ModelAdapter = { complete: () => new Promise(() => {}) };
+    await expect(planCommits(largeChangeSet(), never, { timeoutMs: 50 })).rejects.toThrow("cancelled or timed out");
+    const controller = new AbortController(); controller.abort();
+    const { adapter, calls } = mock([valid()]);
+    await expect(planCommits(largeChangeSet(), adapter, { signal: controller.signal })).rejects.toThrow("cancelled or timed out");
+    expect(calls).toHaveLength(0);
+  });
+  test("small change sets keep the normal evidence and prompt", async () => {
+    const reports: EvidenceReport[] = [];
+    const { adapter, calls } = mock([valid()]);
+    await planCommits(snapshot(), adapter, { onEvidence: report => reports.push(report) });
+    expect(reports[0]).toMatchObject({ condensed: false, truncatedItems: 0, files: 1, hunks: 2 });
+    expect(calls[0]![0]!.content).not.toContain("CONDENSED");
   });
 });

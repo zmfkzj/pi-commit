@@ -25,7 +25,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-import type { CommitPlan, FileChange, ModelAdapter, ModelMessage, ModelResponse, RepoSnapshot } from "../types.ts";
+import type { CommitPlan, FileChange, ModelAdapter, ModelMessage, ModelResponse, PlanValidationError, RepoSnapshot } from "../types.ts";
 import { LOCK_FILE_MANIFESTS, validatePlan } from "./validate.js";
 
 export interface PlannerOptions {
@@ -37,6 +37,28 @@ export interface PlannerOptions {
   /** Total model calls, including the initial attempt (default 3, maximum 8). */
   maxAttempts?: number;
   noChangelog?: boolean;
+  /** Serialized evidence budget in UTF-8 bytes (default and maximum EVIDENCE_LIMIT_BYTES), e.g. lowered for a small model context. */
+  evidenceBudgetBytes?: number;
+  /** Called once, before any model call, with what the model will actually be shown. */
+  onEvidence?: (report: EvidenceReport) => void;
+}
+
+/** What the planner sends to the model. Content-free: sizes and counts only. */
+export interface EvidenceReport {
+  /** True when hunk/whole-file content was cut further to fit the budget. */
+  condensed: boolean;
+  /** Serialized evidence size with the normal (uncondensed) views. */
+  fullBytes: number;
+  /** Serialized evidence size actually sent. */
+  sentBytes: number;
+  budgetBytes: number;
+  /** Every snapshot file and hunk ID is always listed, condensed or not. */
+  files: number;
+  hunks: number;
+  /** Per-hunk / per-whole-file content cap in UTF-8 bytes; undefined when not condensed. */
+  contentCapBytes?: number;
+  /** Hunks and whole-file diffs whose content was cut by condensation. */
+  truncatedItems: number;
 }
 
 const SYSTEM = `You plan Git commits; you cannot execute commands, change files, stage, commit or push.
@@ -63,8 +85,11 @@ message.body and changelogEntry are optional. All other illustrated keys are req
 Use unique ASCII group IDs (1–64 letters/digits/hyphens/underscores). No extra JSON keys.
 Do not fabricate a fallback proposal when you cannot understand the changes.`;
 
-/** Hard ceiling for the serialized model evidence; exceeding it rejects before any model call. */
-const EVIDENCE_LIMIT_BYTES = 1_000_000;
+/** Hard ceiling for the serialized model evidence; normal evidence above the budget is condensed, and
+ * a change set whose metadata alone (paths, statuses, hunk IDs/headers) exceeds it is rejected before any model call. */
+export const EVIDENCE_LIMIT_BYTES = 1_000_000;
+/** Validation feedback appended to a retry is bounded so retries cannot grow the context without limit. */
+const FEEDBACK_MAX_CHARS = 8_000;
 /** Whole-file-only diffs above either cap are truncated in model evidence (never in previews/execution). */
 const WHOLE_FILE_MAX_LINES = 80;
 const WHOLE_FILE_MAX_BYTES = 8 * 1024;
@@ -106,12 +131,12 @@ function utf8Prefix(text: string, maxBytes: number): string {
 }
 
 /** Whole-file-only content: small diffs in full, large ones as a bounded prefix plus an explicit marker. */
-function wholeFileDiffView(diff: string): string {
+function wholeFileDiffView(diff: string, maxBytes = WHOLE_FILE_MAX_BYTES): string {
   const totalBytes = byteLength(diff);
   const lines = diffLines(diff);
-  if (lines.length <= WHOLE_FILE_MAX_LINES && totalBytes <= WHOLE_FILE_MAX_BYTES) return diff;
+  if (lines.length <= WHOLE_FILE_MAX_LINES && totalBytes <= maxBytes) return diff;
   const shown: string[] = [];
-  let budget = WHOLE_FILE_MAX_BYTES;
+  let budget = maxBytes;
   for (const line of lines) {
     if (shown.length >= WHOLE_FILE_MAX_LINES || budget <= 0) break;
     const size = byteLength(line) + 1;
@@ -121,25 +146,127 @@ function wholeFileDiffView(diff: string): string {
     if (partial) shown.push(partial);
     break;
   }
-  return `${shown.join("\n")}\n[whole-file-only: truncated, showing first ${shown.length} of ${lines.length} lines, ${totalBytes} bytes total; must be selected with hunks:\"all\"]`;
+  return `${shown.length ? `${shown.join("\n")}\n` : ""}[whole-file-only: truncated, showing first ${shown.length} of ${lines.length} lines, ${totalBytes} bytes total; must be selected with hunks:\"all\"]`;
 }
 
-function fileDiffView(snapshot: RepoSnapshot, file: FileChange): string {
+function fileDiffView(snapshot: RepoSnapshot, file: FileChange, cap: number): string {
   if (file.binary || file.isLockfile) return BINARY_PLACEHOLDER;
   const diff = snapshot.diffByFile[file.path] ?? "";
-  return file.hunkSplittable ? hunkSplittableDiffView(diff) : wholeFileDiffView(diff);
+  return file.hunkSplittable ? hunkSplittableDiffView(diff) : wholeFileDiffView(diff, Math.min(WHOLE_FILE_MAX_BYTES, cap));
+}
+
+const hunkContentBytes = (lines: string[]): number => lines.reduce((total, line) => total + byteLength(line) + 1, 0);
+
+/** Hunk content, complete when it fits `cap` bytes; otherwise its first lines (the last one possibly cut at a
+ * code-point boundary) plus the real size, so the model knows content is missing. IDs are never dropped. */
+function hunkView(hunk: FileChange["hunks"][number], cap: number): { id: string; lines: string[]; truncated?: { totalLines: number; totalBytes: number } } {
+  const totalBytes = hunkContentBytes(hunk.lines);
+  if (totalBytes <= cap) return { id: hunk.id, lines: hunk.lines };
+  const shown: string[] = [];
+  let budget = cap;
+  for (const line of hunk.lines) {
+    const size = byteLength(line) + 1;
+    if (size <= budget) { shown.push(line); budget -= size; continue; }
+    const partial = utf8Prefix(line, budget);
+    if (partial) shown.push(partial);
+    break;
+  }
+  return { id: hunk.id, lines: shown, truncated: { totalLines: hunk.lines.length, totalBytes } };
+}
+
+interface Evidence { views: string; bytes: number; perFile: () => { path: string; bytes: number }[]; truncatedItems: number }
+
+/** Serialized read-only evidence with every hunk and whole-file diff limited to `cap` bytes (Infinity: normal views). */
+function buildEvidence(snapshot: RepoSnapshot, options: PlannerOptions, cap: number): Evidence {
+  const overview = snapshot.files.map(file => ({ path: file.path, oldPath: file.oldPath, status: file.status, binary: file.binary, isLockfile: file.isLockfile, hunkSplittable: file.hunkSplittable, hunks: file.hunks.map(hunk => ({ id: hunk.id, header: hunk.header })) }));
+  let truncatedItems = 0;
+  const fileDiffs = snapshot.files.map(file => {
+    const view = fileDiffView(snapshot, file, cap);
+    if (Number.isFinite(cap) && !file.hunkSplittable && view !== fileDiffView(snapshot, file, Infinity)) truncatedItems++;
+    return view;
+  });
+  const hunkViews = snapshot.files.map(file => {
+    if (!file.hunkSplittable || file.isLockfile) return undefined;
+    const hunks = file.hunks.map(hunk => hunkView(hunk, cap));
+    truncatedItems += hunks.filter(hunk => hunk.truncated).length;
+    return { path: file.path, hunks };
+  });
+  const views = JSON.stringify({
+    git_overview: { mode: snapshot.mode, files: overview },
+    git_file_diff: Object.fromEntries(snapshot.files.map((file, index) => [file.path, fileDiffs[index]])),
+    git_hunk: hunkViews.filter(view => view !== undefined),
+    recent_commits: options.recentCommits ?? [],
+    lockfile_manifests: LOCK_FILE_MANIFESTS,
+    user_context: options.context ?? "",
+  });
+  const perFile = () => snapshot.files.map((file, index) => ({ path: file.path, bytes: byteLength(JSON.stringify([overview[index], fileDiffs[index], hunkViews[index] ?? null])) }));
+  return { views, bytes: byteLength(views), perFile, truncatedItems };
+}
+
+/** Largest single content item at the normal views; any cap at or above it reproduces the normal evidence. */
+function largestContentItem(snapshot: RepoSnapshot): number {
+  let largest = 0;
+  for (const file of snapshot.files) {
+    if (file.binary || file.isLockfile) continue;
+    if (file.hunkSplittable) for (const hunk of file.hunks) largest = Math.max(largest, hunkContentBytes(hunk.lines));
+    else largest = Math.max(largest, Math.min(WHOLE_FILE_MAX_BYTES, byteLength(snapshot.diffByFile[file.path] ?? "")));
+  }
+  return largest;
+}
+
+/**
+ * Normal evidence when it fits the budget. Otherwise the largest uniform per-item content cap that fits (binary
+ * search; every candidate is measured on the real serialization, so JSON escaping and multi-byte text count), keeping
+ * all metadata. Rejects only when the metadata alone (cap 0) does not fit.
+ */
+function fitEvidence(snapshot: RepoSnapshot, options: PlannerOptions, budget: number): { evidence: Evidence; report: EvidenceReport } {
+  const full = buildEvidence(snapshot, options, Infinity);
+  const counts = { files: snapshot.files.length, hunks: snapshot.files.reduce((total, file) => total + file.hunks.length, 0), budgetBytes: budget, fullBytes: full.bytes };
+  if (full.bytes <= budget) return { evidence: full, report: { ...counts, condensed: false, sentBytes: full.bytes, truncatedItems: 0 } };
+  let low = 0, best = buildEvidence(snapshot, options, 0), high = largestContentItem(snapshot);
+  if (best.bytes > budget) throw evidenceLimitError(full.bytes, budget, full.perFile());
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2), candidate = buildEvidence(snapshot, options, middle);
+    if (candidate.bytes <= budget) { low = middle; best = candidate; } else high = middle;
+  }
+  return { evidence: best, report: { ...counts, condensed: true, sentBytes: best.bytes, contentCapBytes: low, truncatedItems: best.truncatedItems } };
+}
+
+const condensedNote = (cap: number) => `
+This change set is large, so its evidence is CONDENSED to fit the planner budget. git_overview still lists every
+file, status and hunk ID/header, but content is limited to about ${cap} bytes per hunk and per whole-file diff.
+git_hunk entries with a "truncated" field show only their first lines (totalLines/totalBytes give the real size);
+truncated git_file_diff entries carry a marker. Plan from paths, statuses, hunk headers and the visible content;
+never describe hidden content as inspected. Prefer hunks:"all" when a file's whole change belongs to one group.
+Every snapshot file and hunk must still be covered exactly once.`;
+
+/** Validation errors as retry feedback, bounded in size; the omitted remainder is counted, never silently dropped. */
+function validationFeedback(errors: PlanValidationError[]): string {
+  const all = JSON.stringify(errors);
+  if (all.length <= FEEDBACK_MAX_CHARS) return all;
+  const shown: PlanValidationError[] = [];
+  let size = 2;
+  for (const error of errors) {
+    const next = JSON.stringify(error).length + 1;
+    if (size + next > FEEDBACK_MAX_CHARS - 200) break;
+    shown.push(error); size += next;
+  }
+  const rest = errors.slice(shown.length), codes = [...new Set(rest.map(error => error.code))].join(", ");
+  return `${JSON.stringify(shown)} …and ${rest.length} more validation errors (${codes}).`;
 }
 
 const displayPath = (path: string): string => path.replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
 const approxKb = (bytes: number): string => `${Math.max(1, Math.round(bytes / 1000))} KB`;
 
 /** Actionable, content-free explanation: which files weigh the most and how to shrink the change set. */
-function evidenceLimitError(totalBytes: number, perFile: { path: string; bytes: number }[]): Error {
+function evidenceLimitError(totalBytes: number, budget: number, perFile: { path: string; bytes: number }[]): Error {
   const ranked = [...perFile].sort((a, b) => b.bytes - a.bytes || (a.path < b.path ? -1 : 1));
   const top = ranked.slice(0, LARGEST_FILES_IN_ERROR).map(entry => `${displayPath(entry.path)} (~${approxKb(entry.bytes)})`);
   const more = ranked.length - top.length;
+  const limit = budget >= EVIDENCE_LIMIT_BYTES ? "1 MB" : `~${approxKb(budget)}`;
   return new Error(
-    `Change set exceeds the planner's 1 MB evidence limit (~${approxKb(totalBytes)} of evidence); no model call was made. ` +
+    `Change set exceeds the planner's ${limit} evidence limit even when condensed to paths, statuses and hunk headers ` +
+    `(${perFile.length} files, ~${approxKb(totalBytes)} of full evidence); no model call was made. ` +
     `Largest files: ${top.join(", ")}${more > 0 ? `, and ${more} more` : ""}. ` +
     "Stage a subset (`git add <paths>`, then run /commit again; staged mode plans only staged changes) " +
     "or add generated/large untracked files to .gitignore.",
@@ -176,26 +303,14 @@ export async function planCommits(snapshot: RepoSnapshot, adapter: ModelAdapter,
   const timeoutMs = options.timeoutMs ?? 300_000;
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 8) throw new Error("maxAttempts must be an integer from 1 to 8.");
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) throw new Error("timeoutMs must be a positive supported timeout.");
-  const overview = snapshot.files.map(file => ({ path: file.path, oldPath: file.oldPath, status: file.status, binary: file.binary, isLockfile: file.isLockfile, hunkSplittable: file.hunkSplittable, hunks: file.hunks.map(hunk => ({ id: hunk.id, header: hunk.header })) }));
-  const fileDiffs = snapshot.files.map(file => fileDiffView(snapshot, file));
-  const hunkViews = snapshot.files.map(file => file.hunkSplittable && !file.isLockfile ? { path: file.path, hunks: file.hunks.map(hunk => ({ id: hunk.id, lines: hunk.lines })) } : undefined);
-  const views = JSON.stringify({
-    git_overview: { mode: snapshot.mode, files: overview },
-    git_file_diff: Object.fromEntries(snapshot.files.map((file, index) => [file.path, fileDiffs[index]])),
-    git_hunk: hunkViews.filter(view => view !== undefined),
-    recent_commits: options.recentCommits ?? [],
-    lockfile_manifests: LOCK_FILE_MANIFESTS,
-    user_context: options.context ?? "",
-  });
-  // Reject rather than silently truncating evidence or spending unbounded context.
-  const evidenceBytes = byteLength(views);
-  if (evidenceBytes > EVIDENCE_LIMIT_BYTES) {
-    const perFile = snapshot.files.map((file, index) => ({ path: file.path, bytes: byteLength(JSON.stringify([overview[index], fileDiffs[index], hunkViews[index] ?? null])) }));
-    throw evidenceLimitError(evidenceBytes, perFile);
-  }
+  const budget = options.evidenceBudgetBytes ?? EVIDENCE_LIMIT_BYTES;
+  if (!Number.isInteger(budget) || budget < 1 || budget > EVIDENCE_LIMIT_BYTES) throw new Error(`evidenceBudgetBytes must be an integer from 1 to ${EVIDENCE_LIMIT_BYTES}.`);
+  // Never silently truncate: oversized evidence is condensed with explicit markers and reported, or rejected.
+  const { evidence, report } = fitEvidence(snapshot, options, budget);
+  options.onEvidence?.(report);
   const messages: ModelMessage[] = [
-    { role: "system", content: SYSTEM + (options.noChangelog ? "\nChangelog generation is disabled: omit changelogEntry." : "") },
-    { role: "user", content: views },
+    { role: "system", content: SYSTEM + (report.condensed ? condensedNote(report.contentCapBytes!) : "") + (options.noChangelog ? "\nChangelog generation is disabled: omit changelogEntry." : "") },
+    { role: "user", content: evidence.views },
   ];
   const controller = new AbortController();
   const forwardAbort = () => controller.abort();
@@ -220,7 +335,7 @@ export async function planCommits(snapshot: RepoSnapshot, adapter: ModelAdapter,
           if (options.noChangelog) plan.groups = plan.groups.map(({ changelogEntry: _, ...group }) => group);
           return plan;
         }
-        feedback = JSON.stringify(result.errors);
+        feedback = validationFeedback(result.errors);
       } catch (error) { feedback = error instanceof SyntaxError ? "Malformed strict JSON." : error instanceof Error ? error.message : "Malformed proposal."; }
       messages.push({ role: "assistant", content: response.text || "[Invalid structured proposal]" });
       messages.push({ role: "user", content: `Proposal rejected (${attempt}/${maxAttempts}): ${feedback}\nReturn a corrected complete strict-JSON plan. Do not omit any snapshot change.` });

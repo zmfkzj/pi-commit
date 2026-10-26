@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createAssistantMessageEventStream, type Api, type AssistantMessage, type Context, type Model, type ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { createModelAdapter } from "../../src/plan/model.js";
+import { createModelAdapter, planEvidenceBudgetBytes, planOutputTokens } from "../../src/plan/model.js";
 
 const model: Model<Api> = { id: "test", name: "Test", provider: "mock", api: "openai-completions", baseUrl: "http://unused.invalid", input: ["text"], reasoning: false, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 8192 };
 function result(extra: Partial<AssistantMessage> = {}): AssistantMessage {
@@ -51,5 +51,23 @@ describe("installed pi 1.0 public model-registry adapter", () => {
     const { host, requests } = registry(result());
     await expect(createModelAdapter(model, host).complete([{ role: "tool", content: "Result", name: "x", toolCallId: "t" }])).rejects.toThrow("unsupported");
     expect(requests).toHaveLength(0);
+  });
+  test("output token cap grows for many-file plans within the model maximum (8192 floor, 32768 ceiling)", async () => {
+    expect(planOutputTokens({ maxTokens: 8192 })).toBe(8192);
+    expect(planOutputTokens({ maxTokens: 4096 })).toBe(8192); // historical request size kept
+    expect(planOutputTokens({ maxTokens: 12_000 })).toBe(12_000);
+    expect(planOutputTokens({ maxTokens: 128_000 })).toBe(32_768);
+    expect(planOutputTokens({ maxTokens: 0 })).toBe(8192);
+    const { host, requests } = registry(result());
+    await createModelAdapter({ ...model, maxTokens: 128_000 }, host).complete([{ role: "user", content: "Evidence" }]);
+    expect(requests[0]!.options?.maxTokens).toBe(32_768);
+  });
+  test("evidence budget: 1 MB ceiling, lowered for small context windows, never below 64 KB", () => {
+    expect(planEvidenceBudgetBytes({ contextWindow: 1_000_000, maxTokens: 128_000 })).toBe(1_000_000);
+    expect(planEvidenceBudgetBytes({ contextWindow: 200_000, maxTokens: 64_000 })).toBe((200_000 - 3 * 32_768 - 8_192) * 4);
+    expect(planEvidenceBudgetBytes({ contextWindow: 128_000, maxTokens: 8192 })).toBe((128_000 - 3 * 8192 - 8_192) * 4);
+    expect(planEvidenceBudgetBytes({ contextWindow: 16_000, maxTokens: 4096 })).toBe(64_000);
+    expect(planEvidenceBudgetBytes({ contextWindow: 0, maxTokens: 0 })).toBe(1_000_000);
+    expect(planEvidenceBudgetBytes({ contextWindow: Number.NaN, maxTokens: 8192 })).toBe(1_000_000);
   });
 });

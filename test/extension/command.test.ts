@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -322,6 +322,80 @@ describe("pipeline safety with real temporary Git repositories", () => {
     const root = await repo(); await writeFile(join(root, "file.txt"), base);
     const { result } = await run(root, "", { complete: async () => { throw new Error("should not call"); } }); expect(result.status).toBe("empty");
   });
+});
+
+/** Over 1 MB of normal evidence: 160 untracked ~8 KB files (each at the whole-file view cap) plus the tracked edit. */
+async function largeRepo(): Promise<{ root: string; paths: string[] }> {
+  const root = await repo(false), paths: string[] = [];
+  await git(root, ["config", "core.autocrlf", "false"]);
+  await mkdir(join(root, "data"));
+  for (let i = 0; i < 160; i++) {
+    const path = `data/witness-${String(i).padStart(3, "0")}.json`; paths.push(path);
+    await writeFile(join(root, path), Array.from({ length: 70 }, (_, line) => `{"case": ${i}, "line": ${line}, "text": "증거 \\"quoted\\" ${"v".repeat(80)}"}\n`).join(""));
+  }
+  return { root, paths };
+}
+function recordingModel(): { adapter: ModelAdapter; seen: string[][]; system: string[] } {
+  const inner = mockModel(), seen: string[][] = [], system: string[] = [];
+  return { seen, system, adapter: { async complete(messages, tools, options) {
+    system.push(messages[0]!.content);
+    seen.push((JSON.parse(messages[1]!.content) as { git_overview: { files: { path: string }[] } }).git_overview.files.map(file => file.path));
+    return inner.complete(messages, tools, options);
+  } } };
+}
+
+describe("full change sets above the 1 MB evidence budget", () => {
+  test("worktree dry-run plans every file from condensed evidence, discloses it, and writes nothing", async () => {
+    const { root, paths } = await largeRepo(), before = await state(root);
+    const model = recordingModel();
+    const { result, outputs } = await run(root, "--dry-run", model.adapter);
+    expect(result.status).toBe("dry-run");
+    expect(await state(root)).toEqual(before);
+    expect(model.seen).toHaveLength(1);
+    expect([...model.seen[0]!].sort()).toEqual([...paths, "file.txt"].sort());
+    expect(model.system[0]).toContain("CONDENSED");
+    expect(outputs[0]).toBe(START_MESSAGE);
+    expect(outputs[1]).toMatch(/^pi-commit: the change set has ~\d+ KB of planner evidence, over this model's ~1000 KB budget, so all 161 files and \d+ hunks are planned from condensed evidence/);
+    expect(outputs[1]).toContain("Commits still apply the full diffs");
+    expect(outputs[2]).toContain("Coverage: 161 files; every change selected exactly once");
+    expect(outputs[2]).toMatch(/Evidence: CONDENSED for the model \(~\d+ KB of ~\d+ KB; \d+ hunk\(s\)\/file diff\(s\) cut to ~\d+ bytes\); commits use the full diffs/);
+    expect(outputs[2]).not.toMatch(DIFF_LINE);
+    expect(result.plan!.groups.flatMap(group => group.selectors.map(selector => selector.path)).sort()).toEqual([...paths, "file.txt"].sort());
+  }, 60_000);
+  test("staged mode stays staged-only for a large staged subset; unstaged and untracked work is untouched", async () => {
+    const { root, paths } = await largeRepo();
+    const staged = paths.slice(0, 140);
+    await git(root, ["add", "--", ...staged]);
+    await writeFile(join(root, "file.txt"), changed + "unstaged text\n");
+    const before = await state(root), model = recordingModel();
+    const { result, outputs } = await run(root, "--dry-run", model.adapter);
+    expect(result.status).toBe("dry-run");
+    expect(await state(root)).toEqual(before);
+    expect([...model.seen[0]!].sort()).toEqual([...staged].sort());
+    expect(outputs.join("\n")).toContain("Mode: staged");
+    expect(outputs[1]).toContain("all 140 files");
+  }, 60_000);
+  test("the confirmation dialog shows the condensed-evidence line; declining writes nothing", async () => {
+    const { root } = await largeRepo(), before = await state(root);
+    let dialog = "";
+    const ctx = context(root, true, async () => false);
+    ctx.ui.confirm = async (_title, message) => { dialog = message; return false; };
+    const { result } = await run(root, "", mockModel(), ctx);
+    expect(result.status).toBe("cancelled");
+    expect(dialog).toContain("Evidence: CONDENSED for the model");
+    expect(await state(root)).toEqual(before);
+  }, 60_000);
+  test("--yes commits the whole large change set (all files) after the disclosure", async () => {
+    const { root, paths } = await largeRepo();
+    const { result, outputs } = await run(root, "--yes --no-changelog", mockModel());
+    expect(result.status).toBe("executed");
+    expect(result.execution!.succeeded).toHaveLength(1);
+    expect(outputs[1]).toContain("planned from condensed evidence");
+    expect((await git(root, ["status", "--porcelain", "--untracked-files=all"])).stdout.toString()).toBe("");
+    const committed = (await git(root, ["show", "--name-only", "--format=", "HEAD"])).stdout.toString().trim().split("\n").sort();
+    expect(committed).toEqual([...paths, "file.txt"].sort());
+    expect(await readFile(join(root, paths[0]!), "utf8")).toContain("\"case\": 0");
+  }, 60_000);
 });
 
 describe("load and display", () => {

@@ -1,4 +1,21 @@
 import type { CommitGroup, CommitPlan, ExecutionResult, RepoSnapshot } from "../types.js";
+import type { EvidenceReport } from "../plan/planner.js";
+
+const kb = (bytes: number): string => `${Math.max(1, Math.round(bytes / 1000))} KB`;
+
+/** Shown before the model call of an oversized change set: what was planned from what, and that commits use full diffs. */
+export function formatEvidenceNotice(report: EvidenceReport): string {
+  return `pi-commit: the change set has ~${kb(report.fullBytes)} of planner evidence, over this model's ~${kb(report.budgetBytes)} budget, ` +
+    `so all ${report.files} files and ${report.hunks} hunks are planned from condensed evidence (~${kb(report.sentBytes)} sent): ` +
+    `every path, status and hunk ID is included, but ${report.truncatedItems} hunk(s)/file diff(s) show only their first ~${report.contentCapBytes ?? 0} bytes to the model. ` +
+    "Commits still apply the full diffs; use --dry-run to review the plan first.";
+}
+
+/** One preview line for condensed planning; empty for normal evidence. */
+export function evidencePreviewLine(report: EvidenceReport | undefined): string[] {
+  if (!report?.condensed) return [];
+  return [`Evidence: CONDENSED for the model (~${kb(report.sentBytes)} of ~${kb(report.fullBytes)}; ${report.truncatedItems} hunk(s)/file diff(s) cut to ~${report.contentCapBytes ?? 0} bytes); commits use the full diffs`];
+}
 
 /** Escape terminal controls and bidi overrides from untrusted repository text. */
 export function safeDisplay(value: string): string {
@@ -7,12 +24,12 @@ export function safeDisplay(value: string): string {
 }
 
 /** Compact plan summary for --dry-run, the confirmation dialog and --yes. Deliberately contains no diff content. */
-export function formatPreview(snapshot: RepoSnapshot, plan: CommitPlan, ordered: CommitGroup[], push = false): string {
+export function formatPreview(snapshot: RepoSnapshot, plan: CommitPlan, ordered: CommitGroup[], push = false, evidence?: EvidenceReport): string {
   const quote = (value: string) => JSON.stringify(safeDisplay(value));
   const output = ["pi-commit plan", `Repository: ${quote(snapshot.root ?? "(unknown)")}`,
     `Mode: ${snapshot.mode} (${snapshot.mode === "staged" ? "ONLY staged changes; unstaged edits preserved" : "tracked + nonignored untracked changes; nothing staged while planning"})`,
     `Base: ${snapshot.headOid ?? "unborn HEAD"}`, `Coverage: ${snapshot.files.length} files; every change selected exactly once`,
-    `Order: ${ordered.map(group => group.id).join(" -> ")}`];
+    ...evidencePreviewLine(evidence), `Order: ${ordered.map(group => group.id).join(" -> ")}`];
   for (const [index, group] of ordered.entries()) {
     output.push("", `${index + 1}. ${group.id}: ${safeDisplay(group.message.subject)}`);
     if (group.message.body) output.push(safeDisplay(group.message.body));

@@ -2,12 +2,12 @@ import type { ExtensionCommandContext, ExtensionUIContext } from "@earendil-work
 import type { ModelAdapter, ExecutionResult, CommitPlan, RepoSnapshot } from "../types.js";
 import { snapshotRepository, executePlan, recentCommits, pushRepository } from "../git/index.js";
 import { git } from "../git/process.js";
-import { planCommits } from "../plan/planner.js";
+import { planCommits, type EvidenceReport } from "../plan/planner.js";
 import { validatePlan } from "../plan/validate.js";
-import { createModelAdapter } from "../plan/model.js";
+import { createModelAdapter, planEvidenceBudgetBytes } from "../plan/model.js";
 import { buildChangelogPreview, detectChangelog } from "../changelog/index.js";
 import { HELP, parseCommitArgs } from "./args.js";
-import { formatExecution, formatPreview, formatPushFailure, safeDisplay } from "../ui/format.js";
+import { formatEvidenceNotice, formatExecution, formatPreview, formatPushFailure, safeDisplay } from "../ui/format.js";
 
 export type CommitContext = Pick<ExtensionCommandContext, "cwd" | "mode" | "hasUI" | "model" | "signal"> & {
   modelRegistry: Pick<ExtensionCommandContext["modelRegistry"], "find" | "streamSimple">;
@@ -74,13 +74,16 @@ export async function runCommitCommand(args: string, ctx: CommitContext, service
     if (!snapshot.files.length) { services.output("No changes to commit."); return { ...result, status: "empty" }; }
     const adapter = services.adapter ?? createModelAdapter(model!, ctx.modelRegistry);
     const history = await recentCommits(snapshot.root!);
-    const plan = await (services.planner ?? planCommits)(snapshot, adapter, { context: options.context, recentCommits: history.split("\n").filter(Boolean), signal: ctx.signal, noChangelog: options.noChangelog });
+    let evidence: EvidenceReport | undefined;
+    // Oversized change sets are planned from condensed evidence; say so before the model call (--yes shows no preview).
+    const onEvidence = (report: EvidenceReport) => { evidence = report; if (report.condensed) services.output(formatEvidenceNotice(report), "warning"); };
+    const plan = await (services.planner ?? planCommits)(snapshot, adapter, { context: options.context, recentCommits: history.split("\n").filter(Boolean), signal: ctx.signal, noChangelog: options.noChangelog, evidenceBudgetBytes: model ? planEvidenceBudgetBytes(model) : undefined, onEvidence });
     result.plan = plan;
     if (options.noChangelog) plan.changelog = undefined;
     else await prepareChangelog(snapshot, plan);
     const validation = validatePlan(plan, snapshot);
     if (!validation.valid) throw new Error(`Invalid plan: ${validation.errors.map(error => error.message).join("; ")}`);
-    const preview = formatPreview(snapshot, plan, validation.orderedGroups, options.push);
+    const preview = formatPreview(snapshot, plan, validation.orderedGroups, options.push, evidence);
     ctx.signal?.throwIfAborted();
     // The file-level plan summary is shown where it is reviewed (dry-run output, the confirmation dialog, the
     // refusal notice), but not posted to the transcript of a run that commits: its result stays message-centric.

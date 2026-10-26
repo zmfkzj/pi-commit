@@ -11,6 +11,8 @@ export interface CommitOptions {
 export const HELP = `/commit [--dry-run] [--model provider/id] [--context "instructions"] [--no-changelog] [--push] [--yes]
 /commit doctor | /commit install-deps
 Plan a single or hunk-split commit, confirm the plan summary (no diffs) in a dialog (or skip it with --yes), then report each commit's message.
+Change sets over the planner's evidence budget (1 MB or less) are planned whole from condensed evidence; the output says so.
+If any changes are staged, only staged changes are planned; with nothing staged, all tracked and untracked changes are.
 --dry-run       Show the plan summary only; never change index, files, history or remote.
 --model         Exact registered provider/id; otherwise use the current pi model.
 --context       Additional planning instructions (quote multi-word values).

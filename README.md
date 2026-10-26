@@ -173,12 +173,25 @@ symlink/non-UTF8 changelog는 자동 병합을 거부합니다. `--no-changelog`
   검토·취소 후 `--context`로 다시 생성합니다.
 - 서브모듈 포인터 변경은 지원하지만 dirty-only 서브모듈은 먼저 내부 커밋을 요구합니다.
   index conflict는 먼저 해결해야 합니다.
-- read-only 스냅샷에는 전체 tracked/nonignored 내용 hash 비용이 있습니다. 계획 증거는
-  최대 1 MB, 모델 응답 검증은 최대 3회, 전체 모델 작업 제한은 기본 120초입니다.
+- read-only 스냅샷에는 전체 tracked/nonignored 내용 hash 비용이 있습니다. 모델 응답 검증은 최대 3회,
+  전체 모델 작업 제한은 기본 300초입니다. 모델 출력은 모델 최대치 안에서 최대 32,768 토큰까지 허용합니다
+  (수백 개 파일 계획용, 모델 최대치가 8,192 미만이면 기존처럼 8,192).
   hunk로 분할 가능한 diff 내용은 모델에 `git_hunk`로 한 번만 전달하고(`git_file_diff`에는
   중복하지 않음), 큰 whole-file-only 파일은 모델용으로 요약/잘라서 전달합니다(실행은
-  전체 diff 사용). 그래도 1 MB를 넘으면 모델 호출 전에 거부하며, 오류에 가장 큰
-  파일 목록과 일부만 stage(`git add <경로>` 후 `/commit`)하라는 안내를 표시합니다.
+  전체 diff 사용).
+- **큰 변경 집합**: 계획 증거 예산은 최대 1 MB이며, 모델의 context window가 작으면
+  (응답·재시도 여유분을 뺀 뒤 토큰당 약 4바이트로 계산) 더 낮아집니다(최소 64 KB).
+  예산 안이면 증거를 그대로 보냅니다. 넘으면 거부하지 않고 **압축 증거**로 전체를 한 번에
+  계획합니다: 모든 파일 경로·상태·hunk ID/헤더는 그대로 두고, 각 hunk와 whole-file diff
+  내용만 예산에 맞는 같은 크기(바이트)까지 앞부분만 보여 줍니다(잘린 항목에는
+  `truncated`/잘림 표시가 붙고, 모델에도 가려진 내용을 읽은 것처럼 쓰지 말라고 지시합니다).
+  모델 호출 전에 `pi-commit: the change set has ~N KB of planner evidence … condensed evidence …`
+  경고를 출력하고, 계획 요약(`--dry-run`, 승인 대화상자)에도 `Evidence: CONDENSED …` 줄을 표시합니다.
+  커버리지·lockfile·의존성 검증과 실행은 원래의 전체 스냅샷/diff 기준이라 파일이 빠지지 않습니다.
+  재시도 피드백은 약 8,000자로 제한되며 생략한 오류 수와 코드를 함께 알립니다.
+  경로·상태·hunk 헤더 같은 메타데이터만으로도 예산을 넘으면(예: 수만 개 파일) 모델 호출 전에
+  거부하며, 오류에 가장 큰 파일 목록과 일부만 stage(`git add <경로>` 후 `/commit`)하라는 안내를 표시합니다.
+  압축 증거로 만든 계획은 모델이 일부 내용만 본 결과이므로 `--dry-run`으로 먼저 확인하는 것을 권장합니다.
 - 단일 root changelog만 처리하며 monorepo 여러 changelog/release 배포는 지원하지 않습니다.
 - legacy llm-git/backend/cache 및 upstream 전체 8400 LOC vendoring은 포함하지 않습니다.
 - **실제 터미널 UI 조작, live LLM provider/OAuth 호출은 검증하지 않았습니다.**

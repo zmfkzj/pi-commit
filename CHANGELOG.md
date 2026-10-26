@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- `/commit` no longer refuses change sets whose planner evidence exceeds 1 MB (for example ~2.6 MB across 477 files): it plans the whole change set in one model call from condensed evidence (every path, status and hunk ID kept; each hunk/whole-file diff shown only up to a uniform byte cap that fits the budget), says so before the model call and in the plan summary (`Evidence: CONDENSED …`), and still validates coverage, lockfile pairing and dependencies against the full snapshot and commits the full diffs. Only a change set whose metadata alone exceeds the budget is rejected. The budget is lowered for models with small context windows, plans may use up to 32,768 output tokens (within the model's maximum), and retry feedback is bounded.
 - `/commit` previews of large diffs no longer crash the TUI (`Maximum call stack size exceeded` in Markdown rendering); `/commit` output is now rendered as plain text instead of Markdown.
 - `/commit --push` no longer freezes the TUI on a Git credential prompt (`Username for 'https://github.com':`): the push runs non-interactively (terminal prompts disabled, no controlling terminal), so missing credentials fail at once while credential helpers, askpass programs and ssh-agent keys still work. A failed push now says the commits were created locally, shows Git's reason and, for authentication failures, how to set up non-interactive auth.
 
