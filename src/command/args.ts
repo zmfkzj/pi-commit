@@ -4,11 +4,12 @@ export interface CommitOptions {
   context?: string;
   noChangelog: boolean;
   push: boolean;
+  submodules: boolean;
   yes: boolean;
   help: boolean;
 }
 
-export const HELP = `/commit [--dry-run] [--model provider/id] [--context "instructions"] [--no-changelog] [--push] [--yes]
+export const HELP = `/commit [--dry-run] [--model provider/id] [--context "instructions"] [--no-changelog] [--push] [--submodules] [--yes]
 /commit doctor | /commit install-deps
 Plan a single or hunk-split commit, confirm the plan summary (no diffs) in a dialog (or skip it with --yes), then report each commit's message.
 Change sets over the planner's evidence budget (1 MB or less) are planned whole from condensed evidence; the output says so.
@@ -18,6 +19,10 @@ If any changes are staged, only staged changes are planned; with nothing staged,
 --context       Additional planning instructions (quote multi-word values).
 --no-changelog  Do not generate a changelog (existing edits remain in the plan).
 --push          Push only after every planned commit succeeds; never force push.
+--submodules    Also commit changed descendant submodules (recursively), children first, and update their pointers in
+                each parent; one plan summary and confirmation covers every repository. With --push, also push each
+                committed submodule, and any already-committed submodule at any depth whose referenced commits are on
+                no remote yet, children first before its parent. Without --push nothing is pushed.
 --yes           Skip the confirmation dialog and execute the validated plan directly (all modes); --dry-run still never writes.
 --help          Show this help. Without --yes, interactive/RPC modes ask for confirmation and print/JSON modes refuse to write.
 doctor          Check Git, the Git identity, the current directory's work tree and the planning model (read-only).
@@ -66,7 +71,7 @@ export function tokenizeArgs(input: string): string[] {
 }
 
 export function parseCommitArgs(input: string): CommitOptions {
-  const options: CommitOptions = { dryRun: false, noChangelog: false, push: false, yes: false, help: false };
+  const options: CommitOptions = { dryRun: false, noChangelog: false, push: false, submodules: false, yes: false, help: false };
   const seen = new Set<string>(), args = tokenizeArgs(input);
   for (let i = 0; i < args.length; i++) {
     const raw = args[i]!, equal = raw.indexOf("="), flag = equal < 0 ? raw : raw.slice(0, equal);
@@ -86,6 +91,7 @@ export function parseCommitArgs(input: string): CommitOptions {
       case "--dry-run": options.dryRun = true; break;
       case "--no-changelog": options.noChangelog = true; break;
       case "--push": options.push = true; break;
+      case "--submodules": options.submodules = true; break;
       case "--yes": options.yes = true; break;
       case "--help": options.help = true; break;
       default: throw new Error(`Unknown /commit option: ${raw}. Use /commit --help.`);

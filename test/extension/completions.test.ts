@@ -41,7 +41,9 @@ describe("/commit argument completions", () => {
     expect(rest).not.toContain("--dry-run --push --push");
     expect(rest).toHaveLength(allFlags.length - 2);
     expect(values("--model=openai/gpt --m")).toBeNull();
-    expect(values('--context="x y" --model a/b --')).toEqual(["--dry-run", "--no-changelog", "--push", "--yes", "--help"].map(flag => `--context="x y" --model a/b ${flag}`));
+    expect(values('--context="x y" --model a/b --')).toEqual(["--dry-run", "--no-changelog", "--push", "--submodules", "--yes", "--help"].map(flag => `--context="x y" --model a/b ${flag}`));
+    expect(values("--su")).toEqual(["--submodules"]);
+    expect(values("--push --submodules ")).not.toContain("--push --submodules --submodules");
   });
 
   test("offers nothing while a value, a quote or an escape is typed, or for non-options", () => {

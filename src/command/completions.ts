@@ -13,6 +13,7 @@ export const COMMIT_OPTIONS: readonly OptionSpec[] = [
   { flag: "--context", description: "Additional planning instructions (quote multi-word values)", takesValue: true },
   { flag: "--no-changelog", description: "Do not generate a changelog" },
   { flag: "--push", description: "Push after every planned commit succeeds" },
+  { flag: "--submodules", description: "Also commit (and with --push push) changed nested submodules" },
   { flag: "--yes", description: "Skip the confirmation dialog" },
   { flag: "--help", description: "Show /commit help" },
 ];

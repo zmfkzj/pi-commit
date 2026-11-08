@@ -96,14 +96,15 @@ export async function executePlan(snapshot: RepoSnapshot, plan: CommitPlan, orde
     result.remainingGroups = groups.map(g => g.id);
     if (!snapshot.root) throw new Error("Snapshot has no repository root");
     root = snapshot.root;
-    const fresh = await snapshotRepository(root);
+    const pending = snapshot.pendingSubmodules ?? [];
+    const fresh = await snapshotRepository(root, pending);
     if (fresh.fingerprint !== snapshot.fingerprint) throw new Error("Repository changed since preview; generate a fresh plan");
     await checkChangelog(root, plan);
     realIndex = lineOutput((await git(root, ["rev-parse", "--path-format=absolute", "--git-path", "index"])).stdout);
     originalIndex = expectedIndex = await optionalRead(realIndex);
     // Reserve the actual index lock, while all Git writes use different private indexes.
     lock = await open(`${realIndex}.lock`, "wx", 0o600);
-    if ((await snapshotRepository(root)).fingerprint !== snapshot.fingerprint) throw new Error("Repository changed while acquiring index lock");
+    if ((await snapshotRepository(root, pending)).fingerprint !== snapshot.fingerprint) throw new Error("Repository changed while acquiring index lock");
     temp = await mkdtemp(join(tmpdir(), "pi-commit-index-"));
     const sourceIndex = join(temp, "source"), commitIndex = join(temp, "commit"), reconcile = join(temp, "reconcile");
     if (originalIndex) await writeFile(sourceIndex, originalIndex);
@@ -115,7 +116,7 @@ export async function executePlan(snapshot: RepoSnapshot, plan: CommitPlan, orde
     for (const path of fixedPaths) expectedStates.set(path, await pathState(root, path));
     const expectedDigest = () => digest(...fixedPaths.flatMap(path => [path, expectedStates.get(path)!]));
     let expectedWorktree = expectedDigest();
-    if ((await snapshotRepository(root)).fingerprint !== snapshot.fingerprint) throw new Error("Repository changed while preparing execution");
+    if ((await snapshotRepository(root, pending)).fingerprint !== snapshot.fingerprint) throw new Error("Repository changed while preparing execution");
     let expectedHead = snapshot.headOid;
     const committedHunks = new Map<string, string[]>();
     const sourceEnv = { GIT_INDEX_FILE: sourceIndex }, commitEnv = { GIT_INDEX_FILE: commitIndex };
@@ -132,14 +133,14 @@ export async function executePlan(snapshot: RepoSnapshot, plan: CommitPlan, orde
         if (selector.hunks !== "all") {
           const patch = buildHunkPatch(file, selector.hunks, committedHunks.get(file.path) ?? []);
           await git(root, ["apply", "--cached", "--whitespace=nowarn", "-"], { env: commitEnv, input: patch });
-        } else if (snapshot.mode === "staged") {
+        } else if (snapshot.mode === "staged" && !pending.includes(file.path)) {
           const paths = [file.path, ...(file.oldPath ? [file.oldPath] : [])];
           for (const path of paths) {
             const entry = (await git(root, ["ls-files", "--stage", "-z", "--", path], { env: sourceEnv })).stdout;
             if (entry.length) await git(root, ["update-index", "-z", "--index-info"], { env: commitEnv, input: entry });
             else await git(root, ["update-index", "--force-remove", "--", path], { env: commitEnv });
           }
-        } else {
+        } else { // worktree mode, or a pending submodule pointer (its HEAD at this moment) in staged mode
           await git(root, ["add", "-A", "--", ...changedPaths.slice(changedPaths.length - (file.oldPath ? 2 : 1))], { env: commitEnv });
         }
       }
@@ -175,7 +176,9 @@ export async function executePlan(snapshot: RepoSnapshot, plan: CommitPlan, orde
       expectedHead = nextHead;
       for (const selector of group.selectors) if (selector.hunks !== "all") committedHunks.set(selector.path, [...(committedHunks.get(selector.path) ?? []), ...selector.hunks]);
       if (!sameBytes(await optionalRead(realIndex), expectedIndex)) throw new Error("Real index changed despite lock; committed history retained, index not overwritten");
-      const reconcilePaths = snapshot.mode === "worktree" ? changedPaths : generated ? [generated.file] : [];
+      // Staged mode: also record committed submodule pointers, or the real index would stage their reversal.
+      const reconcilePaths = snapshot.mode === "worktree" ? changedPaths
+        : [...changedPaths.filter(path => pending.includes(path)), ...(generated ? [generated.file] : [])];
       if (reconcilePaths.length) await reconcileIndex(root, realIndex, reconcile, reconcilePaths, nextHead);
       expectedIndex = await optionalRead(realIndex);
       if (await worktreeDigest(root, fixedPaths) !== expectedWorktree) throw new Error("A commit hook or external process changed the worktree; changes preserved, remaining groups stopped");
@@ -217,9 +220,20 @@ export async function executePlan(snapshot: RepoSnapshot, plan: CommitPlan, orde
  * Explicit --push only: one attached branch to its configured upstream branch, never tags,
  * matching branches, recursive submodule pushes, mirrors or force refspecs. Submodule commits must
  * be available on a remote (check mode). Failure retains local history. Runs non-interactively: missing
- * credentials fail fast instead of prompting on the terminal pi's TUI owns.
+ * credentials fail fast instead of prompting on the terminal pi's TUI owns. (--submodules pushes each
+ * submodule with its own call, children first.)
  */
 export async function pushRepository(cwd: string): Promise<void> {
+  const { remote, branchRef, merge } = await checkPushTarget(cwd);
+  await git(cwd, [
+    "-c", "push.default=nothing", "-c", "push.followTags=false", "-c", `remote.${remote}.mirror=false`,
+    "-c", "push.recurseSubmodules=check", "push", "--no-force", "--no-follow-tags", "--recurse-submodules=check",
+    "--", remote, `${branchRef}:${merge}`,
+  ], { nonInteractive: true });
+}
+
+/** The attached branch and its single, safe upstream, or a "Push refused: …" error. Read-only (used as a preflight). */
+export async function checkPushTarget(cwd: string): Promise<{ remote: string; branchRef: string; merge: string }> {
   const branchResult = await git(cwd, ["symbolic-ref", "--quiet", "HEAD"], { allowFailure: true });
   if (branchResult.code !== 0) throw new Error("Push refused: HEAD is detached; check out a branch with a configured upstream");
   const branchRef = lineOutput(branchResult.stdout);
@@ -248,9 +262,5 @@ export async function pushRepository(cwd: string): Promise<void> {
       (await git(cwd, ["check-ref-format", merge], { allowFailure: true })).code !== 0) {
     throw new Error("Push refused: upstream destination must be a valid refs/heads branch");
   }
-  await git(cwd, [
-    "-c", "push.default=nothing", "-c", "push.followTags=false", "-c", `remote.${remote}.mirror=false`,
-    "-c", "push.recurseSubmodules=check", "push", "--no-force", "--no-follow-tags", "--recurse-submodules=check",
-    "--", remote, `${branchRef}:${merge}`,
-  ], { nonInteractive: true });
+  return { remote, branchRef, merge };
 }

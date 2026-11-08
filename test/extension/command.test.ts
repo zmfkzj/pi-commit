@@ -76,10 +76,13 @@ async function hook(root: string, content: string) {
 describe("argument parser", () => {
   test("quotes, escapes and equals values", () => {
     expect(tokenizeArgs(`--context "fix a \\\"quoted\\\" bug" --model 'provider/org/model'`)).toEqual(["--context", 'fix a "quoted" bug', "--model", "provider/org/model"]);
-    expect(parseCommitArgs(`--dry-run --context='hello world' --model=provider/id --no-changelog --push --yes`)).toEqual({ dryRun: true, context: "hello world", model: "provider/id", noChangelog: true, push: true, yes: true, help: false });
+    expect(parseCommitArgs(`--dry-run --context='hello world' --model=provider/id --no-changelog --push --yes`)).toEqual({ dryRun: true, context: "hello world", model: "provider/id", noChangelog: true, push: true, submodules: false, yes: true, help: false });
+    expect(parseCommitArgs("--submodules --push")).toMatchObject({ submodules: true, push: true, dryRun: false, yes: false });
+    expect(parseCommitArgs("").submodules).toBe(false);
   });
   test("reject unknown/ambiguous arguments", () => {
-    for (const args of ["--wat", "free text", "--model", "--model id", "--context", '--context "', "--yes=true", "--dry-run --dry-run", "--context --yes", "--context ''", "\\"]) expect(() => parseCommitArgs(args)).toThrow();
+    for (const args of ["--wat", "free text", "--model", "--model id", "--context", '--context "', "--yes=true", "--dry-run --dry-run", "--context --yes", "--context ''", "\\", "--submodules=true", "--submodules --submodules", "--submodule", "submodules"]) expect(() => parseCommitArgs(args)).toThrow();
+    expect(parseCommitArgs('--context "keep --submodules as text"')).toMatchObject({ context: "keep --submodules as text", submodules: false });
   });
   test("exact provider/id lookup preserves slash inside model id", () => {
     const ctx = context("/tmp"); let selected: string[] = [];

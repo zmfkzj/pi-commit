@@ -43,6 +43,8 @@ pi install --local /home/arthur/Code/pi-commit
 /commit --context "인증 수정과 문서 변경을 별도 커밋으로 나눠 주세요"
 /commit --model provider/model-id --no-changelog
 /commit --push
+/commit --submodules
+/commit --submodules --push
 /commit --help
 ```
 
@@ -53,6 +55,7 @@ pi install --local /home/arthur/Code/pi-commit
 | `--context "내용"` | 분석·분할·메시지 작성에 추가 지시. 여러 단어는 따옴표 사용 |
 | `--no-changelog` | 생성 changelog 비활성화. 기존 사용자 changelog 변경은 일반 변경으로 취급 |
 | `--push` | 모든 계획 커밋 성공 후 현재 브랜치만 설정된 upstream으로 non-force push. 태그 포함 안 함 |
+| `--submodules` | 변경된 하위 서브모듈(중첩 포함)도 함께 커밋. 자식부터 커밋하고 각 부모에 새 서브모듈 포인터를 커밋하며, 모든 저장소 계획을 한 번에 요약·승인. `--push`가 있을 때만 서브모듈도 push(자식 먼저) — 아래 [서브모듈](#서브모듈---submodules) 참고 |
 | `--yes` | 승인 대화상자를 건너뜀 (TUI/RPC/print 모두). 파일별 계획 요약 없이 바로 실행하고 결과(커밋 메시지)만 출력하며, `--dry-run`과 함께 써도 쓰기는 없음 |
 | `--help` | 도움말 |
 
@@ -139,7 +142,7 @@ Git 설치 안내는 Linux(apt/dnf), macOS(`xcode-select --install`/brew), Windo
    설정된 upstream remote/branch에 명시적인 non-force `HEAD:<upstream ref>`로 전송합니다.
    태그 follow, matching/mirror/force refspec 등 주변 push 설정은 비활성화합니다.
    서브모듈은 `--recurse-submodules=check`로 검사하여 참조한 커밋이 서브모듈 remote에 없으면
-   거부하며, 서브모듈을 자동으로 push하지 않습니다. detached HEAD, 누락/모호/안전하지 않은 upstream이면 거부하며,
+   거부하며, 서브모듈을 자동으로 push하지 않습니다(`--submodules --push`를 함께 준 경우만 서브모듈을 먼저 push). detached HEAD, 누락/모호/안전하지 않은 upstream이면 거부하며,
    non-fast-forward도 거부합니다. push 거부/실패를 보고하고 성공한 로컬 커밋은 그대로
    남겨 둡니다. history reset이나 자동 재시도는 하지 않습니다.
    push는 비대화형으로 실행됩니다(`GIT_TERMINAL_PROMPT=0`, POSIX에서는 제어 터미널 없는 새 세션).
@@ -151,6 +154,48 @@ Git 설치 안내는 Linux(apt/dnf), macOS(`xcode-select --install`/brew), Windo
 필터와 외부 프로세스는 신뢰한 사용자 코드이며 샌드박스가 아닙니다. hook이 파일/tree를
 바꾸면 추가 그룹 실행을 중단할 수 있지만 그 사용자 변경을 강제 삭제하지 않습니다.
 실행 중 crash/전원 장애까지 원자적인 다중 커밋 트랜잭션을 보장하지 않습니다.
+
+## 서브모듈 (`--submodules`)
+
+`--submodules`를 주면 현재 저장소와 함께 **변경된 하위 서브모듈(중첩 서브모듈까지 재귀적으로)**을 커밋합니다.
+옵션이 없으면 기존 동작 그대로입니다(dirty-only 서브모듈은 여전히 거부, 서브모듈 push 없음).
+
+- **대상 찾기**: 각 저장소 index의 gitlink(모드 160000) 중 체크아웃된 서브모듈(디렉터리가 자기 work tree의 최상위)만
+  봅니다. 초기화되지 않은 서브모듈(빈/없는 디렉터리)은 로컬 변경이 있을 수 없으므로 건너뛰며, 자동 초기화나 브랜치
+  전환은 하지 않습니다. symlink 경로 등 그 밖의 배치는 쓰기 전에 오류로 거부합니다. 서브모듈의 변경 여부는 그 저장소
+  자체의 스냅샷(기존 staged/worktree 규칙, ignored 파일 제외)으로 판단하며 `.gitmodules`의 `ignore=` 설정에 좌우되지 않습니다.
+- **계획과 승인**: 변경된 모든 저장소를 자식 → 부모 순서로 각각 기존 방식대로 계획·changelog 병합·검증한 뒤,
+  하나의 계획 요약(`pi-commit plan (--submodules)`: 저장소 순서, 저장소별 브랜치/모드/그룹/파일, diff 없음)과
+  **한 번의 승인**(또는 `--yes`)으로 실행합니다. 어느 저장소든 계획·검증이 실패하면 아무것도 쓰지 않습니다.
+  `--dry-run`, 취소, UI 없는 거부도 모든 저장소에 쓰기가 없습니다.
+- **포인터 커밋**: 이번 실행에서 커밋되는 자식의 gitlink는 부모 계획에 whole-file 변경으로 들어가고(계획 요약에
+  `submodule pointer -> its new HEAD from this run` 표시), 실행 시 자식의 새 HEAD로 기록됩니다. 부모가 staged 모드여도
+  이 포인터는 포함되며(사용자가 요청한 변경), 부모의 다른 unstaged/untracked 변경은 기존대로 제외됩니다. staged 모드에서도
+  실제 index에 커밋된 포인터를 기록하므로 포인터가 되돌려진 채 stage되어 남지 않습니다.
+- **실행과 안전장치**: 자식부터 저장소별로 기존 drift-guarded executor를 실행합니다. 부모의 fingerprint는 이번에
+  커밋될 자식 gitlink 경로의 상태만 제외하고 HEAD·index bytes·다른 모든 경로를 그대로 검사합니다(자식 내용은 자식의
+  executor가 검사). 부모 커밋 직전에 자식 HEAD가 이번 실행이 만든 커밋인지 확인하고, 커밋 후 부모 커밋이 그 OID를
+  기록했는지 다시 확인합니다. 한 저장소가 실패하면(hook 실패, drift, HEAD 이동 등) 즉시 멈추고 이후 저장소(부모)는
+  커밋하지 않으며, 이미 만든 커밋은 되돌리지 않고 저장소별 결과·`Not committed:` 목록과 함께 오류로 보고합니다.
+- **push (`--submodules --push`)**: 모든 저장소의 커밋이 성공한 뒤에만, 자식 → 부모 순서로 저장소마다 기존과 같은
+  upstream 전용·non-force·비대화형·`--recurse-submodules=check` push를 합니다. push 대상은 두 종류입니다.
+  - **이번에 커밋한 저장소**: 항상 push합니다.
+  - **이미 커밋돼 있던 push 전용 의존 저장소(깊이 제한 없음)**: push될 커밋이 참조하는 서브모듈 커밋이 그 서브모듈의
+    어느 remote-tracking ref에도 없으면 그 서브모듈을 부모보다 먼저 push합니다. 참조 대상은 push 대상 브랜치의
+    upstream에 아직 없는 기존 로컬 커밋들과 이번에 기록할 포인터(worktree 모드는 서브모듈 HEAD, staged 모드는 stage된
+    포인터)입니다. Git의 `--recurse-submodules=check`가 거부할 기준과 같으며, 같은 규칙을 그 서브모듈의 커밋에도
+    재귀적으로 적용하므로 중첩 깊이와 무관하게, 커밋이 이번 실행 전에 만들어졌든 이번 실행에서 만들어졌든 똑같이
+    동작합니다. 이미 remote에 있는 커밋만 참조하면 그 서브모듈은 push하지도 검사하지도 않습니다(detached여도 무방,
+    브랜치의 다른 새 커밋도 publish하지 않음). 계획 요약에 `Also pushed first …`와 `Push order: …`로 표시됩니다.
+
+  push 대상이 여러 개면 **커밋 전에** 모든 대상의 브랜치/upstream을 검사해, detached HEAD나 upstream 누락이 있으면
+  (최상위 저장소 포함, 어느 깊이든) 아무것도 쓰지 않고 거부합니다. push가 하나라도 실패하면 거기서 멈추고 부모는
+  push하지 않으며, 이미 push한 저장소(`Already pushed:`)와 남은 저장소(`Not pushed:`)를 보고합니다.
+  `--push`가 없으면 어떤 저장소도 push하지 않습니다.
+- **detached HEAD 서브모듈**: `--push` 없이는 커밋을 허용하되 계획 요약에 `Branch: DETACHED HEAD`로 표시합니다
+  (새 커밋은 HEAD와 부모 포인터만 참조). `--push`와 함께면 그 저장소를 push해야 할 때 위 사전 검사에서 거부됩니다.
+- 서브모듈 작업이 없으면(변경된 서브모듈도, 먼저 push해야 할 의존 서브모듈도 없으면) 일반 `/commit`과 같은 단일 저장소 실행입니다.
+- 다른 옵션은 모든 저장소에 똑같이 적용됩니다(`--context`, `--model`, `--no-changelog`; changelog는 저장소마다 생성).
 
 ## Changelog
 
@@ -171,7 +216,8 @@ symlink/non-UTF8 changelog는 자동 병합을 거부합니다. `--no-changelog`
 - 계획 대상 내부에서는 전체 변경을 커버해야 합니다. 일부 hunk만 제외하려면 먼저 원하는
   내용만 사용자가 stage하세요. GUI식 체크박스 선택/메시지 편집기는 없으며 모델 계획을
   검토·취소 후 `--context`로 다시 생성합니다.
-- 서브모듈 포인터 변경은 지원하지만 dirty-only 서브모듈은 먼저 내부 커밋을 요구합니다.
+- 서브모듈 포인터 변경은 지원하지만 dirty-only 서브모듈은 먼저 내부 커밋을 요구합니다(`--submodules`를 쓰면 함께 커밋).
+  `--submodules`의 부모 커밋은 저장소마다 별도 커밋이며 여러 저장소에 걸친 원자적 트랜잭션은 아닙니다.
   index conflict는 먼저 해결해야 합니다.
 - read-only 스냅샷에는 전체 tracked/nonignored 내용 hash 비용이 있습니다. 모델 응답 검증은 최대 3회,
   전체 모델 작업 제한은 기본 300초입니다. 모델 출력은 모델 최대치 안에서 최대 32,768 토큰까지 허용합니다
@@ -210,7 +256,9 @@ bun test
 테스트는 `mkdtemp` Git 저장소와 로컬 bare remote만 사용합니다. 사용자의 프로젝트에
 커밋하거나 push하지 않습니다. 주요 검증: staged/unstaged 보존, 빈 index 분석,
 동일 파일 순방향/역방향 hunk 분할, 의존성/cycle/lockfile, 특수 경로, 신설/삭제/rename/
-binary/mode/submodule, drift, dry-run/cancel/no-confirm, hook 첫/후속 실패,
+binary/mode/submodule, drift, dry-run/cancel/no-confirm, hook 첫/후속 실패, `--submodules`(중첩 서브모듈 커밋 순서·포인터,
+staged 부모/자식, push/no-push와 로컬 bare remote ref, push 사전 거부·자식 push 실패 전파, 자식 hook/계획 실패, 부모 drift,
+이미 커밋된 깊은 의존 서브모듈의 재귀 push·사전 거부·실패 전파, staged 포인터 기준, 이미 publish된 커밋은 push 안 함),
 changelog 보존·merge, 모델 실패/재시도, 공개 pi loader smoke, `doctor`/`install-deps`
 (격리된 `HOME`/`GIT_CONFIG_GLOBAL`과 가짜 `git` 스크립트, 실제 설정·설치 없음).
 

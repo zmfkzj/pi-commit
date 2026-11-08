@@ -43,6 +43,11 @@ export interface RepoSnapshot {
   diffByFile: Record<string, string>;
   /** Optional canonical repository root supplied by the Git implementation. */
   root?: string;
+  /**
+   * --submodules only: gitlink paths of submodules committed earlier in the same run. Their pointer is staged from the
+   * submodule's HEAD at execution (also in staged mode) and their state is excluded from the fingerprint.
+   */
+  pendingSubmodules?: string[];
 }
 
 export interface Selector {

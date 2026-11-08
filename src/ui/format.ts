@@ -25,8 +25,14 @@ export function safeDisplay(value: string): string {
 
 /** Compact plan summary for --dry-run, the confirmation dialog and --yes. Deliberately contains no diff content. */
 export function formatPreview(snapshot: RepoSnapshot, plan: CommitPlan, ordered: CommitGroup[], push = false, evidence?: EvidenceReport): string {
+  return ["pi-commit plan", ...planLines(snapshot, plan, ordered, evidence), "",
+    push ? "EXPLICIT PUSH REQUEST: push current branch after ALL commits succeed (no force)." : "No push requested.",
+    "Execution runs Git hooks/signing. A later failure keeps earlier successful commits; no fallback or history reset."].join("\n");
+}
+
+function planLines(snapshot: RepoSnapshot, plan: CommitPlan, ordered: CommitGroup[], evidence?: EvidenceReport): string[] {
   const quote = (value: string) => JSON.stringify(safeDisplay(value));
-  const output = ["pi-commit plan", `Repository: ${quote(snapshot.root ?? "(unknown)")}`,
+  const output = [`Repository: ${quote(snapshot.root ?? "(unknown)")}`,
     `Mode: ${snapshot.mode} (${snapshot.mode === "staged" ? "ONLY staged changes; unstaged edits preserved" : "tracked + nonignored untracked changes; nothing staged while planning"})`,
     `Base: ${snapshot.headOid ?? "unborn HEAD"}`, `Coverage: ${snapshot.files.length} files; every change selected exactly once`,
     ...evidencePreviewLine(evidence), `Order: ${ordered.map(group => group.id).join(" -> ")}`];
@@ -37,7 +43,8 @@ export function formatPreview(snapshot: RepoSnapshot, plan: CommitPlan, ordered:
     if (group.changelogEntry) output.push(`Changelog entry: ${safeDisplay(group.changelogEntry)}`);
     for (const selector of group.selectors) {
       const file = snapshot.files.find(item => item.path === selector.path)!;
-      output.push(`  ${quote(file.path)} [${file.status}${file.binary ? ", binary" : ""}${file.isLockfile ? ", lockfile" : ""}]`);
+      const pending = snapshot.pendingSubmodules?.includes(file.path) ? ", submodule pointer -> its new HEAD from this run" : "";
+      output.push(`  ${quote(file.path)} [${file.status}${file.binary ? ", binary" : ""}${file.isLockfile ? ", lockfile" : ""}${pending}]`);
       if (file.oldPath) output.push(`  From: ${quote(file.oldPath)}`);
       const selection = selector.hunks === "all" ? "ALL (whole-file change)" : `${selector.hunks.length} of ${file.hunks.length} hunk(s): ${selector.hunks.map(quote).join(", ")}`;
       output.push(`  Selection: ${selection}`);
@@ -45,8 +52,46 @@ export function formatPreview(snapshot: RepoSnapshot, plan: CommitPlan, ordered:
   }
   if (plan.changelog) output.push("", `Generated changelog: ${quote(plan.changelog.file)} (included in ${ordered.at(-1)!.id})`);
   else output.push("", "Generated changelog: none");
-  output.push("", push ? "EXPLICIT PUSH REQUEST: push current branch after ALL commits succeed (no force)." : "No push requested.",
-    "Execution runs Git hooks/signing. A later failure keeps earlier successful commits; no fallback or history reset.");
+  return output;
+}
+
+/** One --submodules repository: `path` is relative to the top-level repository ("" for it). */
+export interface RepositoryPlanView {
+  path: string;
+  snapshot: RepoSnapshot;
+  plan: CommitPlan;
+  ordered: CommitGroup[];
+  evidence?: EvidenceReport;
+  branch: string | null;
+}
+export function repositoryLabel(path: string): string {
+  return path ? `submodule ${JSON.stringify(safeDisplay(path))}` : "top-level repository";
+}
+export function repositoryTitle(path: string): string {
+  const label = repositoryLabel(path);
+  return label[0]!.toUpperCase() + label.slice(1);
+}
+
+/**
+ * --submodules plan summary: every repository's plan, children first, under one authorization. No diff content.
+ * `pushOnly`: already-committed submodules pushed too; `pushOrder`: every repository path in push order.
+ */
+export function formatRepositoriesPreview(repositories: RepositoryPlanView[], push: boolean, pushOnly: string[] = [], pushOrder: string[] = []): string {
+  const commits = repositories.reduce((sum, repository) => sum + repository.plan.groups.length, 0);
+  const output = [`pi-commit plan (--submodules): ${commits} commit(s) in ${repositories.length} repositories; submodules are committed before their parents`,
+    `Repository order: ${repositories.map(repository => repositoryLabel(repository.path)).join(" -> ")}`];
+  for (const [index, repository] of repositories.entries()) {
+    output.push("", `=== ${index + 1}/${repositories.length}: ${repositoryTitle(repository.path)} ===`,
+      `Branch: ${repository.branch === null ? "DETACHED HEAD (new commits are on no branch; HEAD and the parent's submodule pointer reference them)" : JSON.stringify(safeDisplay(repository.branch))}`,
+      ...planLines(repository.snapshot, repository.plan, repository.ordered, repository.evidence));
+  }
+  output.push("");
+  if (push) {
+    output.push("EXPLICIT PUSH REQUEST: after ALL commits in ALL repositories succeed, push each repository's current branch to its upstream, submodules first (no force); a failed push stops before the remaining repositories.");
+    if (pushOnly.length) output.push(`Also pushed first (already committed, not yet on a remote, and referenced by the commits being pushed): ${pushOnly.map(repositoryLabel).join(", ")}`);
+    if (pushOrder.length) output.push(`Push order: ${pushOrder.map(repositoryLabel).join(" -> ")}`);
+  } else output.push("No push requested: nothing is pushed in any repository.");
+  output.push("Execution runs Git hooks/signing in each repository. A failure stops before the remaining repositories (parents keep their old submodule pointers) and keeps earlier successful commits; no fallback or history reset.");
   return output.join("\n");
 }
 
