@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { ModelAdapter, ExecutionResult, CommitPlan, RepoSnapshot } from "../types.js";
-import { snapshotRepository, executePlan, recentCommits, pushRepository, checkPushTarget, repositoryRoot, headOid, currentBranch, initializedSubmodules, unpublishedSubmodules, type PushTarget } from "../git/index.js";
+import { snapshotRepository, executePlan, recentCommits, pushRepository, checkPushTarget, repositoryRoot, headOid, currentBranch, initializedSubmodules, unpublishedSubmodules, DirtySubmoduleError, type PushTarget } from "../git/index.js";
 import { git, lineOutput } from "../git/process.js";
 import { planCommits, type EvidenceReport } from "../plan/planner.js";
 import { validatePlan } from "../plan/validate.js";
@@ -109,7 +109,13 @@ export async function runCommitCommand(args: string, ctx: CommitContext, service
       // No submodule work: the ordinary single-repository run.
       snapshot = repositories[0]?.snapshot;
     }
-    snapshot ??= await snapshotRepository(ctx.cwd);
+    snapshot ??= await snapshotRepository(ctx.cwd).catch((error: unknown) => {
+      // Committing a dirty submodule before its parent's pointer is the explicit --submodules workflow; say so.
+      if (error instanceof DirtySubmoduleError && !options.submodules) {
+        throw new Error(`${error.message}, or rerun with --submodules to commit it (and its changed nested submodules) before this repository records its new pointer`);
+      }
+      throw error;
+    });
     result = { status: "error", snapshot };
     if (!snapshot.files.length) { services.output("No changes to commit."); return { ...result, status: "empty" }; }
     const adapter = services.adapter ?? createModelAdapter(model!, ctx.modelRegistry);

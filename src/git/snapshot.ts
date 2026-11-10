@@ -114,6 +114,12 @@ function namedChanges(bytes: Buffer): NamedChange[] {
   return files;
 }
 
+/** A dirty submodule whose HEAD is still the recorded commit: its parent has no pointer change to commit (yet). */
+export class DirtySubmoduleError extends Error {
+  readonly path: string;
+  constructor(path: string) { super(`Dirty submodule ${JSON.stringify(path)} has no new commit; commit inside the submodule first`); this.path = path; }
+}
+
 /**
  * Pure inspection: status uses GIT_OPTIONAL_LOCKS=0; never git add or write-tree on the real index.
  * `pendingSubmodules` (--submodules) are gitlink paths of submodules that this run commits first. Each is always a
@@ -161,7 +167,7 @@ export async function snapshotRepository(cwd: string, pendingSubmodules: readonl
     if (mode === "worktree" && submodule && !pending.has(change.path)) {
       const previous = /^-Subproject commit ([0-9a-f]+)/m.exec(diff)?.[1];
       const next = /^\+Subproject commit ([0-9a-f]+)/m.exec(diff)?.[1];
-      if (previous && previous === next) throw new Error(`Dirty submodule ${JSON.stringify(change.path)} has no new commit; commit inside the submodule first`);
+      if (previous && previous === next) throw new DirtySubmoduleError(change.path);
     }
     const hunks = binary || submodule ? [] : parseHunks(change.path, diff);
     files.push({ ...change, binary, isLockfile: isLockfile(change.path), untracked: isUntracked,

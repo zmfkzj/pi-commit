@@ -475,12 +475,118 @@ describe("/commit --submodules --push publishes already-committed descendants at
   });
 });
 
+/** The `pic` alias of the report: `pi -p '/commit --push --yes --submodules'`. */
+const PIC = "--push --yes --submodules";
+/** A repository published to its own bare remote, for `sub` to add as a new nested submodule (like pi-workbench/astryx). */
+async function publishedRepository(base: string, name: string): Promise<string> {
+  const remote = join(base, `${name}.git`), seed = join(base, `seed-${name}`);
+  await mkdir(remote); await git(remote, ["init", "-q", "--bare", "--initial-branch=main"]);
+  await mkdir(seed); await git(seed, ["init", "-q", "--initial-branch=main"]);
+  await writeFile(join(seed, `${name}.txt`), `${name} base\n`);
+  await git(seed, ["add", "--all"]); await git(seed, ["commit", "-qm", `${name} base`]); await git(seed, ["push", "-q", remote, "main"]);
+  return remote;
+}
+
+describe("the reported pic run (/commit --push --yes --submodules) with a dirty submodule that has no new commit", () => {
+  test("a nested submodule staged by `git submodule add` in sub: dry-run writes nothing; then sub is committed and pushed before top records and pushes its pointer; sub's unstaged/untracked work stays", async () => {
+    const fixture = await nested(), { repos, remotes } = fixture;
+    const extraRemote = await publishedRepository(fixture.base, "extra"), extraHead = (await remoteRef(extraRemote))!;
+    await git(repos.sub, ["submodule", "add", "-q", "-b", "main", extraRemote, "extra"]);
+    // Work that the staged selection of sub leaves out.
+    await writeFile(join(repos.sub, "sub.txt"), "sub unstaged\n"); await writeFile(join(repos.sub, "notes.txt"), "untracked\n");
+    const subBase = await head(repos.sub);
+    // The reported state: sub is dirty at its recorded commit (no new commit), and that is top's only change.
+    expect(await out(repos.top, ["ls-files", "--stage", "--", "sub"])).toBe(`160000 ${subBase} 0\tsub`);
+    expect(await out(repos.top, ["status", "--porcelain", "--untracked-files=all"])).toBe(" M sub");
+    expect(await out(repos.top, ["diff", "--submodule=short", "--", "sub"])).toContain(`-Subproject commit ${subBase}\n+Subproject commit ${subBase}-dirty`);
+    expect(await out(repos.sub, ["diff", "--cached", "--name-only"])).toBe(".gitmodules\nextra");
+    expect(await out(repos.sub, ["ls-files", "--stage", "--", "extra"])).toBe(`160000 ${extraHead} 0\textra`);
+    const before = await state(fixture);
+    const dry = await run(repos.top, `${PIC} --dry-run`, model().adapter);
+    expect(dry.result.status).toBe("dry-run"); expect(await state(fixture)).toEqual(before);
+    for (const text of ["Repository order: submodule \"sub\" -> top-level repository", "Mode: staged (ONLY staged changes; unstaged edits preserved)",
+      "\"sub\" [modified, submodule pointer -> its new HEAD from this run]", "Push order: submodule \"sub\" -> top-level repository"]) expect(dry.output).toContain(text);
+
+    const planner = model();
+    const { result, outputs } = await run(repos.top, PIC, planner.adapter);
+    expect(result.status).toBe("executed"); expect(result.error).toBeUndefined(); expect(result.pushed).toBe(true);
+    expect(planner.planned).toEqual([[".gitmodules", "extra"], ["sub"]]);
+    expect(result.repositories!.map(repository => repository.path)).toEqual(["sub", ""]);
+    const subHead = await head(repos.sub);
+    expect(await out(repos.sub, ["rev-parse", "HEAD~1"])).toBe(subBase);
+    expect(await out(repos.sub, ["show", "--name-only", "--format=", "HEAD"])).toBe(".gitmodules\nextra");
+    expect(await out(repos.sub, ["rev-parse", "HEAD:extra"])).toBe(extraHead);
+    expect(await out(repos.top, ["show", "--name-only", "--format=", "HEAD"])).toBe("sub");
+    expect(await out(repos.top, ["rev-parse", "HEAD:sub"])).toBe(subHead);
+    for (const name of ["sub", "top"] as const) expect(await remoteRef(remotes[name])).toBe(await head(repos[name]));
+    // Top committed exactly the new pointer (also in its real index); sub kept the work its staged selection excluded.
+    expect(await out(repos.top, ["ls-files", "--stage", "--", "sub"])).toBe(`160000 ${subHead} 0\tsub`);
+    expect(await out(repos.top, ["diff", "--cached"])).toBe("");
+    expect(await out(repos.top, ["status", "--porcelain", "--untracked-files=all"])).toBe(" M sub");
+    expect(await out(repos.sub, ["status", "--porcelain", "--untracked-files=all"])).toBe(" M sub.txt\n?? notes.txt");
+    expect(await readFile(join(repos.sub, "sub.txt"), "utf8")).toBe("sub unstaged\n");
+    expect(await readFile(join(repos.sub, "notes.txt"), "utf8")).toBe("untracked\n");
+    expect(await out(repos.sub, ["show", "HEAD:sub.txt"])).toBe("sub base");
+    // The added submodule's commit is already published: it is neither pushed nor changed; inner is untouched.
+    expect(await remoteRef(extraRemote)).toBe(extraHead);
+    expect(await head(repos.inner)).toBe((before.inner as { head: string }).head);
+    expect(outputs.at(-1)).toBe("Push completed: submodule \"sub\", top-level repository.");
+  });
+
+  test("a change only two levels down: inner, sub and top are committed and pushed in that order", async () => {
+    const { repos, remotes } = await nested();
+    await writeFile(join(repos.inner, "inner.txt"), "inner changed\n");
+    const planner = model();
+    const { result, outputs } = await run(repos.top, PIC, planner.adapter);
+    expect(result.status).toBe("executed"); expect(result.error).toBeUndefined(); expect(result.pushed).toBe(true);
+    expect(planner.planned).toEqual([["inner.txt"], ["inner"], ["sub"]]);
+    expect(await out(repos.sub, ["rev-parse", "HEAD:inner"])).toBe(await head(repos.inner));
+    expect(await out(repos.top, ["rev-parse", "HEAD:sub"])).toBe(await head(repos.sub));
+    for (const name of NAMES) expect(await remoteRef(remotes[name])).toBe(await head(repos[name]));
+    expect(outputs.at(-1)).toBe("Push completed: submodule \"sub/inner\", submodule \"sub\", top-level repository.");
+  });
+
+  test("when the dirty submodule cannot be committed, top records no pointer and nothing is pushed", async () => {
+    const fixture = await nested(), { repos } = fixture;
+    await writeFile(join(repos.sub, "sub.txt"), "sub changed\n");
+    await hook(repos.sub, "pre-commit", "exit 1");
+    const before = await state(fixture);
+    const { result, output } = await run(repos.top, PIC, model().adapter);
+    expect(result.status).toBe("executed"); expect(result.pushed).toBeUndefined();
+    expect(result.repositories!.map(repository => repository.execution?.succeeded.length)).toEqual([0, undefined]);
+    expect(result.error).toContain("Stopped. Submodule \"sub\": Commit g1 failed");
+    expect(result.error).toContain("Not committed: top-level repository"); expect(result.error).toContain("Nothing was pushed.");
+    expect(output).not.toContain("Top-level repository: Committed"); expect(output).not.toContain("Push completed");
+    expect(await state(fixture)).toEqual(before);
+  });
+
+  test("a nested repository cloned without `git submodule add` is not a submodule: refused before any write", async () => {
+    const fixture = await nested(), { repos } = fixture;
+    await git(fixture.base, ["clone", "-q", await publishedRepository(fixture.base, "extra"), join(repos.sub, "extra")]);
+    const before = await state(fixture), planner = model();
+    const { result, output } = await run(repos.top, PIC, planner.adapter);
+    expect(result.status).toBe("error"); expect(planner.planned).toEqual([]);
+    expect(output).toContain("pi-commit: submodule \"sub\": Unsupported/unsafe Git path \"extra/\"");
+    expect(await state(fixture)).toEqual(before);
+  });
+});
+
 describe("without --submodules (unchanged behavior)", () => {
-  test("a dirty-only submodule is still refused and nothing is written", async () => {
+  test("a dirty-only submodule is still refused, the refusal names --submodules, and nothing is written", async () => {
     const fixture = await nested(); await writeFile(join(fixture.repos.inner, "inner.txt"), "inner changed\n");
     const before = await state(fixture);
     const { result, output } = await run(fixture.repos.top, "--yes", model().adapter);
-    expect(result.status).toBe("error"); expect(output).toContain("Dirty submodule \"sub\" has no new commit");
+    // Without the opt-in only the direct child is visible; it is named, with how to commit it (and its nested change) first.
+    expect(result.status).toBe("error"); expect(output).toContain("pi-commit: Dirty submodule \"sub\" has no new commit; commit inside the submodule first, or rerun with --submodules");
+    expect(await state(fixture)).toEqual(before);
+  });
+  test("the reported failure: plain /commit --push --yes with a dirty submodule fails before planning, points to --submodules and writes or pushes nothing", async () => {
+    const fixture = await nested(); await writeFile(join(fixture.repos.sub, "sub.txt"), "sub changed\n");
+    const before = await state(fixture), planner = model();
+    const { result, outputs } = await run(fixture.repos.top, "--push --yes", planner.adapter);
+    expect(result.status).toBe("error"); expect(planner.planned).toEqual([]);
+    expect(outputs).toEqual(["pi-commit: analyzing changes and planning commits…",
+      "pi-commit: Dirty submodule \"sub\" has no new commit; commit inside the submodule first, or rerun with --submodules to commit it (and its changed nested submodules) before this repository records its new pointer"]);
     expect(await state(fixture)).toEqual(before);
   });
   test("--submodules with no submodule work is the ordinary single-repository run", async () => {

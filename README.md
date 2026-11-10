@@ -158,12 +158,17 @@ Git 설치 안내는 Linux(apt/dnf), macOS(`xcode-select --install`/brew), Windo
 ## 서브모듈 (`--submodules`)
 
 `--submodules`를 주면 현재 저장소와 함께 **변경된 하위 서브모듈(중첩 서브모듈까지 재귀적으로)**을 커밋합니다.
-옵션이 없으면 기존 동작 그대로입니다(dirty-only 서브모듈은 여전히 거부, 서브모듈 push 없음).
+옵션이 없으면 기존 동작 그대로입니다(dirty-only 서브모듈은 여전히 거부, 서브모듈 push 없음). 이 거부는 계획 전에 일어나며,
+오류(`Dirty submodule "…" has no new commit; commit inside the submodule first, or rerun with --submodules …`)는
+`--submodules`로 다시 실행하면 그 서브모듈(과 변경된 중첩 서브모듈)을 먼저 커밋한 뒤 부모가 새 포인터를 기록한다고 안내합니다.
+예: `pi -p '/commit --push --yes --submodules'`는 자식 커밋 → 부모 포인터 커밋 → 자식 push → 부모 push 순서입니다.
 
 - **대상 찾기**: 각 저장소 index의 gitlink(모드 160000) 중 체크아웃된 서브모듈(디렉터리가 자기 work tree의 최상위)만
   봅니다. 초기화되지 않은 서브모듈(빈/없는 디렉터리)은 로컬 변경이 있을 수 없으므로 건너뛰며, 자동 초기화나 브랜치
   전환은 하지 않습니다. symlink 경로 등 그 밖의 배치는 쓰기 전에 오류로 거부합니다. 서브모듈의 변경 여부는 그 저장소
   자체의 스냅샷(기존 staged/worktree 규칙, ignored 파일 제외)으로 판단하며 `.gitmodules`의 `ignore=` 설정에 좌우되지 않습니다.
+  index에 gitlink로 등록되지 않은 중첩 Git 저장소(`git submodule add` 없이 clone한 디렉터리)는 서브모듈이 아니므로
+  쓰기 전에 `Unsupported/unsafe Git path "…/"` 오류로 거부합니다(`git submodule add` 후 다시 실행).
 - **계획과 승인**: 변경된 모든 저장소를 자식 → 부모 순서로 각각 기존 방식대로 계획·changelog 병합·검증한 뒤,
   하나의 계획 요약(`pi-commit plan (--submodules)`: 저장소 순서, 저장소별 브랜치/모드/그룹/파일, diff 없음)과
   **한 번의 승인**(또는 `--yes`)으로 실행합니다. 어느 저장소든 계획·검증이 실패하면 아무것도 쓰지 않습니다.
